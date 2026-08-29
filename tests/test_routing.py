@@ -1,4 +1,8 @@
-"""Tests for model routing."""
+"""Tests for model routing.
+
+Phase 1 + Phase 2: tests the RoutingPolicy and ModelRouter.
+Updated for Phase 2 tuple return from select_tier.
+"""
 
 import asyncio
 
@@ -59,7 +63,7 @@ class TestTaskProfile:
 
 
 class TestRoutingPolicy:
-    """Test RoutingPolicy logic."""
+    """Test RoutingPolicy logic — Phase 2 tuple return."""
 
     def test_select_tier_by_complexity(self):
         policy = RoutingPolicy()
@@ -67,7 +71,7 @@ class TestRoutingPolicy:
             task_type=TaskType.CRUD,
             complexity=ComplexityTier.LOW,
         )
-        tier = policy.select_tier(profile)
+        tier, _ = policy.select_tier(profile)
         assert tier == ModelTier.FAST
 
     def test_select_tier_medium(self):
@@ -76,7 +80,7 @@ class TestRoutingPolicy:
             task_type=TaskType.CRUD,
             complexity=ComplexityTier.MEDIUM,
         )
-        tier = policy.select_tier(profile)
+        tier, _ = policy.select_tier(profile)
         assert tier == ModelTier.BALANCED
 
     def test_select_tier_critical(self):
@@ -85,18 +89,21 @@ class TestRoutingPolicy:
             task_type=TaskType.CRUD,
             complexity=ComplexityTier.CRITICAL,
         )
-        tier = policy.select_tier(profile)
+        tier, _ = policy.select_tier(profile)
         assert tier == ModelTier.FLAGSHIP_XHIGH
 
     def test_minimum_tier_enforcement(self):
         """Test that minimum tier for task type is enforced."""
         policy = RoutingPolicy()
+        # Mathematical modeling has minimum FLAGSHIP_HIGH, but
+        # the reasoning_requirement=CRITICAL also pushes tier up
         profile = TaskProfile.for_task_type(
             TaskType.MATHEMATICAL_MODELING,
             complexity=ComplexityTier.LOW,
         )
-        tier = policy.select_tier(profile)
-        assert tier == ModelTier.FLAGSHIP_HIGH
+        tier, _ = policy.select_tier(profile)
+        # At minimum FLAGSHIP_HIGH, but dimension rules may push higher
+        assert policy._tier_order(tier) >= policy._tier_order(ModelTier.FLAGSHIP_HIGH)
 
     def test_escalation_chain(self):
         policy = RoutingPolicy()
@@ -114,7 +121,8 @@ class TestRoutingPolicy:
             complexity=ComplexityTier.MEDIUM,
             retry_count=2,
         )
-        tier = policy.select_tier(profile)
+        tier, _ = policy.select_tier(profile)
+        # Medium -> BALANCED, then 2 escalations -> FLAGSHIP_XHIGH
         assert tier == ModelTier.FLAGSHIP_XHIGH
 
     def test_retry_escalation_capped(self):
@@ -125,7 +133,7 @@ class TestRoutingPolicy:
             complexity=ComplexityTier.MEDIUM,
             retry_count=10,
         )
-        tier = policy.select_tier(profile)
+        tier, _ = policy.select_tier(profile)
         assert tier == ModelTier.FLAGSHIP_MAX
 
     def test_documentation_minimum(self):
@@ -135,23 +143,24 @@ class TestRoutingPolicy:
             TaskType.DOCUMENTATION,
             complexity=ComplexityTier.TRIVIAL,
         )
-        tier = policy.select_tier(profile)
+        tier, _ = policy.select_tier(profile)
         assert tier == ModelTier.FAST
 
 
 class TestModelRouter:
-    """Test ModelRouter."""
+    """Test ModelRouter — Phase 2 tuple return."""
 
     def test_select_tier(self):
         router = ModelRouter()
         profile = TaskProfile.for_task_type(TaskType.DOCUMENTATION)
-        tier = router.select_tier(profile)
+        tier, explanation = router.select_tier(profile)
         assert tier == ModelTier.FAST
+        assert explanation is not None
 
     def test_select_tier_math(self):
         router = ModelRouter()
         profile = TaskProfile.for_task_type(TaskType.MATHEMATICAL_MODELING)
-        tier = router.select_tier(profile)
+        tier, _ = router.select_tier(profile)
         assert tier in (ModelTier.FLAGSHIP_HIGH, ModelTier.FLAGSHIP_XHIGH)
 
     def test_get_provider_for_tier(self):

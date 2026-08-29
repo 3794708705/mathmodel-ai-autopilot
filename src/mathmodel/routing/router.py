@@ -17,7 +17,7 @@ from mathmodel.providers.base import (
     StructuredGenerationRequest,
 )
 from mathmodel.providers.registry import get_provider_registry
-from mathmodel.routing.policy import RoutingPolicy
+from mathmodel.routing.policy import RoutingExplanation, RoutingPolicy
 from mathmodel.routing.profile import TaskProfile
 
 logger = logging.getLogger(__name__)
@@ -35,8 +35,13 @@ class ModelRouter:
         self._registry = get_provider_registry()
         self._settings = get_settings()
 
-    def select_tier(self, profile: TaskProfile) -> ModelTier:
-        """Select the appropriate model tier for a task profile."""
+    def select_tier(
+        self, profile: TaskProfile
+    ) -> tuple[ModelTier, RoutingExplanation]:
+        """Select the appropriate model tier for a task profile.
+
+        Returns both the tier and an explanation of why it was chosen.
+        """
         return self._policy.select_tier(profile)
 
     def get_provider_for_tier(
@@ -46,7 +51,6 @@ class ModelRouter:
         provider_type = preferred_provider or self._get_default_provider_for_tier(tier)
         provider = self._registry.get_provider(provider_type)
 
-        # Warn if the provider is a mock (real provider unavailable)
         if provider.provider_name == "mock":
             logger.warning(
                 "Provider %s fell back to MockProvider (API key missing or unavailable). "
@@ -69,15 +73,16 @@ class ModelRouter:
         Profiles the task, selects the tier, and delegates to the
         appropriate provider.
         """
-        tier = self.select_tier(profile)
+        tier, explanation = self.select_tier(profile)
         provider = self.get_provider_for_tier(tier, preferred_provider)
 
         logger.info(
-            "Routing task type=%s tier=%s provider=%s retry=%d",
+            "Routing task type=%s tier=%s provider=%s retry=%d reasons=%s",
             profile.task_type.value,
             tier.value,
             provider.provider_name,
             profile.retry_count,
+            explanation.primary_reasons,
         )
 
         request = GenerationRequest(
@@ -108,14 +113,15 @@ class ModelRouter:
         **kwargs,
     ):
         """Route a structured generation request through the model router."""
-        tier = self.select_tier(profile)
+        tier, explanation = self.select_tier(profile)
         provider = self.get_provider_for_tier(tier, preferred_provider)
 
         logger.info(
-            "Routing structured task type=%s tier=%s provider=%s",
+            "Routing structured task type=%s tier=%s provider=%s reasons=%s",
             profile.task_type.value,
             tier.value,
             provider.provider_name,
+            explanation.primary_reasons,
         )
 
         request = StructuredGenerationRequest(

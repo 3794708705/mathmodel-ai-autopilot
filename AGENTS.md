@@ -24,16 +24,17 @@ Correctness > Traceability > Validation > Competition Value > Reliability > Main
 
 ## Current Development Phase
 
-**Phase 1 — Foundation** (completed)
+**Phase 2 — Reasoning Core** (completed)
 
-- FastAPI skeleton
-- PostgreSQL + SQLAlchemy
-- Configuration management
-- ModelProvider abstraction
-- ModelRouter
-- BaseAgent
-- ProblemState skeleton
-- Testing infrastructure
+- ProblemAgent: problem understanding, decomposition, evidence extraction
+- ModelExplorer: candidate model generation with diversity guard
+- EligibilityGate: hard/soft eligibility checks
+- ModelJury: deterministic weighted scoring and ranking
+- LiteratureAgent: search planning skeleton (no fabricated results)
+- Typed domain schemas for all Reasoning Core objects
+- RoutingPolicy upgraded with dimension-based tier selection and RoutingExplanation
+- 3 competition fixtures (A: optimization, B: prediction+optimization, C: routing)
+- 149 tests (78 new Phase 2 tests)
 
 ## Common Commands
 
