@@ -40,6 +40,8 @@ markers = [
     "asyncio: async test marker",
     "integration: integration test",
     "postgresql: requires PostgreSQL",
+    "live: requires real external API credentials and network",
+    "external: requires external service",
 ]
 
 [tool.setuptools.packages.find]

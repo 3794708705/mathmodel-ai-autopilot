@@ -1,0 +1,42 @@
+{
+  "provider": "crossref",
+  "real_queries": 3,
+  "records": [
+    {
+      "title": "Production Planning in the Linear Programming Model: Linear Programming",
+      "doi": "10.1007/978-3-642-14610-7_19",
+      "year": 2011,
+      "source": "crossref"
+    },
+    {
+      "title": "Linear physical programming for production planning optimization",
+      "doi": "10.1080/0305215031000078401",
+      "year": 2003,
+      "source": "crossref"
+    },
+    {
+      "title": "Inventory Optimization in Supply Chain Verticals",
+      "doi": "10.1002/9781119220428.ch12",
+      "year": 2015,
+      "source": "crossref"
+    },
+    {
+      "title": "Application of Optimization in Production, Logistics, Inventory, Supply Chain Ma",
+      "doi": "10.3390/books978-3-03928-523-5",
+      "year": 2020,
+      "source": "crossref"
+    },
+    {
+      "title": "EXACT ALGORITHMS FOR THE CAPACITATED VEHICLE ROUTING PROBLEM",
+      "doi": "10.17771/pucrio.acad.24379",
+      "year": null,
+      "source": "crossref"
+    },
+    {
+      "title": "Exact Solution of the Capacitated Vehicle Routing Problem",
+      "doi": "10.1002/9780470400531.eorms0949",
+      "year": 2011,
+      "source": "crossref"
+    }
+  ]
+}
