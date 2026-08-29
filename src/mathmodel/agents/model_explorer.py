@@ -214,12 +214,23 @@ class ModelExplorer(BaseAgent):
                             error_type="reference",
                         ))
 
+            # Cycle detection
+            if c.has_cycles:
+                cycles = c._find_cycles()
+                errors.append(AgentError(
+                    message=f"Candidate {c.candidate_id}: component dependency "
+                            f"graph has cycles: {cycles}",
+                    error_type="cycle",
+                    details={"cycles": cycles},
+                ))
+
         return errors
 
     def _check_diversity(self, candidates: list[ModelCandidate]) -> list[str]:
         """Check that candidates are sufficiently diverse.
 
         Returns a list of issue descriptions (empty = good).
+        Uses is_essentially_same_as() for deep comparison.
         """
         issues = []
 
@@ -237,19 +248,16 @@ class ModelExplorer(BaseAgent):
                     f"similarity key '{key}'. Candidates: "
                     f"{[c.name for c in group]}"
                 )
-            elif len(group) == 2:
-                # Two similar is okay if they have different component counts
-                if group[0].model_family == group[1].model_family:
-                    # Check if they're essentially the same
-                    names_similar = (
-                        group[0].name.lower().replace(" ", "") ==
-                        group[1].name.lower().replace(" ", "")
+
+        # Pairwise deep comparison
+        for i in range(len(candidates)):
+            for j in range(i + 1, len(candidates)):
+                if candidates[i].is_essentially_same_as(candidates[j]):
+                    issues.append(
+                        f"Candidates '{candidates[i].name}' and "
+                        f"'{candidates[j].name}' are essentially the same model. "
+                        f"Same family, same structure, or same assumptions."
                     )
-                    if names_similar:
-                        issues.append(
-                            f"Candidates appear identical: '{group[0].name}' "
-                            f"and '{group[1].name}'"
-                        )
 
         return issues
 

@@ -109,7 +109,7 @@ class ModelJuryResult(BaseModel):
     rejected_models: list[str] = Field(default_factory=list)
 
     # Decision
-    decision_reason: str = Field(default="", min_length=1)
+    decision_reason: str = Field(default="", description="Human-readable decision rationale")
     risks: list[str] = Field(default_factory=list)
     confidence: float = Field(default=0.5, ge=0.0, le=1.0)
 
@@ -147,6 +147,14 @@ def compute_jury_scores(
     LLM is never trusted to compute the total — Python does it.
     """
     w = weights or DEFAULT_JURY_WEIGHTS
+
+    # Validate all dimensions are present
+    missing_dims = [dim for dim in JuryDimension if dim not in w]
+    if missing_dims:
+        raise ValueError(
+            f"Weights missing dimensions: {[d.value for d in missing_dims]}. "
+            f"All 8 JuryDimension values must be present."
+        )
 
     # Validate weights sum to 100
     total_weight = sum(w.values())

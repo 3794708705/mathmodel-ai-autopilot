@@ -151,6 +151,18 @@ class EligibilityPolicy:
                 reason="Not feasible within competition constraints",
             ))
 
+        # High computation cost — policy controlled
+        if implementation_risks and not self.allow_high_computation:
+            high_cost_risks = [
+                r for r in implementation_risks
+                if "comput" in r.lower() or "cost" in r.lower() or "expensive" in r.lower()
+            ]
+            if high_cost_risks:
+                warnings.append(EligibilityWarning(
+                    check=EligibilityCheck.IMPLEMENTATION_PATH,
+                    reason=f"High computational cost: {'; '.join(high_cost_risks)}",
+                ))
+
         eligible = len(hard_failures) == 0
 
         return EligibilityResult(

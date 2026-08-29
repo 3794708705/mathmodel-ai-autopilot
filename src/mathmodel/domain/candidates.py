@@ -6,6 +6,7 @@ proposed by ModelExplorer.
 
 from __future__ import annotations
 
+from collections import defaultdict, deque
 from enum import Enum
 from typing import Any, Optional
 from uuid import uuid4
@@ -114,11 +115,109 @@ class ModelCandidate(BaseModel):
         return len(self.components) > 1
 
     @property
+    def has_cycles(self) -> bool:
+        """Check if the component dependency graph has cycles."""
+        if not self.components:
+            return False
+        return bool(self._find_cycles())
+
+    def _find_cycles(self) -> list[list[str]]:
+        """Find cycles in the component dependency graph using topological sort."""
+        comp_ids = {c.component_id for c in self.components}
+        # Build adjacency list
+        graph: dict[str, list[str]] = defaultdict(list)
+        in_degree: dict[str, int] = {cid: 0 for cid in comp_ids}
+
+        for c in self.components:
+            for dep in c.dependencies:
+                if dep in comp_ids:
+                    graph[dep].append(c.component_id)
+                    in_degree[c.component_id] = in_degree.get(c.component_id, 0) + 1
+
+        # Kahn's algorithm for topological sort
+        queue = deque([cid for cid in comp_ids if in_degree.get(cid, 0) == 0])
+        visited = 0
+
+        while queue:
+            node = queue.popleft()
+            visited += 1
+            for neighbor in graph[node]:
+                in_degree[neighbor] -= 1
+                if in_degree[neighbor] == 0:
+                    queue.append(neighbor)
+
+        # If visited != len(comp_ids), there are cycles
+        if visited != len(comp_ids):
+            remaining = [cid for cid in comp_ids if in_degree.get(cid, 0) > 0]
+            return [remaining]  # Return the cycle participants
+        return []
+
+    @property
+    def is_dag(self) -> bool:
+        """Whether the component graph is a valid DAG (no cycles)."""
+        return not self.has_cycles
+
+    @property
     def core_components(self) -> list[ModelComponent]:
         """Return only CORE_MODEL components."""
         return [c for c in self.components if c.role == ComponentRole.CORE_MODEL]
 
     def similarity_key(self) -> str:
-        """Generate a key for similarity comparison between candidates."""
+        """Generate a key for similarity comparison between candidates.
+
+        Uses model_family, component families, and mathematical_structure
+        to detect genuinely similar candidates.
+        """
         families = sorted(set(c.model_family.value for c in self.components))
-        return f"{self.model_family.value}|{'/'.join(families)}"
+        # Normalize mathematical structure for comparison
+        math_key = (
+            self.mathematical_structure.lower()
+            .replace(" ", "")
+            .replace("\n", "")[:80]
+        )
+        return f"{self.model_family.value}|{'/'.join(families)}|{math_key}"
+
+    def is_essentially_same_as(self, other: "ModelCandidate") -> bool:
+        """Check if two candidates are essentially the same model.
+
+        Compares name similarity, component structure, and assumptions
+        — not just model_family.
+        """
+        if self.candidate_id == other.candidate_id:
+            return True
+
+        # Same model_family
+        same_family = self.model_family == other.model_family
+
+        # Name similarity (normalized)
+        self_name = self.name.lower().replace(" ", "").replace("-", "").replace("_", "")
+        other_name = other.name.lower().replace(" ", "").replace("-", "").replace("_", "")
+        names_similar = self_name == other_name
+
+        # Component structure similarity
+        self_comp_families = sorted(c.model_family.value for c in self.components)
+        other_comp_families = sorted(c.model_family.value for c in other.components)
+        same_components = self_comp_families == other_comp_families
+
+        # Same mathematical structure (normalized)
+        self_math = self.mathematical_structure.lower().replace(" ", "").replace("\n", "")
+        other_math = other.mathematical_structure.lower().replace(" ", "").replace("\n", "")
+        same_math = self_math == other_math and len(self_math) > 0
+
+        # Same assumptions
+        self_assumptions = sorted(a.lower().strip() for a in self.required_assumptions)
+        other_assumptions = sorted(a.lower().strip() for a in other.required_assumptions)
+        same_assumptions = (
+            self_assumptions == other_assumptions
+            and len(self_assumptions) > 0
+        )
+
+        # Two candidates are "essentially same" if:
+        # - same family AND similar names, OR
+        # - same family AND same math structure, OR
+        # - same family AND same components AND same assumptions
+        return (
+            (same_family and names_similar)
+            or (same_family and same_math)
+            or (same_family and same_components and same_assumptions)
+        )
