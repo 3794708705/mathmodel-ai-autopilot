@@ -44,11 +44,13 @@ class DataProfiler:
             )
 
         columns = []
+        all_col_values = []  # Store column values for later use
         for idx, header in enumerate(headers):
             col_values = [
                 row[idx] if idx < len(row) else None
                 for row in rows
             ]
+            all_col_values.append(col_values)
             col = DataProfiler._profile_column(header, col_values)
             columns.append(col)
 
@@ -57,7 +59,7 @@ class DataProfiler:
 
         # Outlier candidates (IQR method)
         outliers = []
-        for col in columns:
+        for col, col_values in zip(columns, all_col_values):
             if col.dtype in ("int64", "float64") and col.quantiles:
                 q1 = col.quantiles.get("q25", 0)
                 q3 = col.quantiles.get("q75", 0)
@@ -82,8 +84,8 @@ class DataProfiler:
         # Correlation candidates (numeric columns only)
         correlations = []
         numeric_cols = [
-            (c, DataProfiler._get_numeric_values(c.name, col_values, headers, rows))
-            for c, col_values in zip(columns, [[row[i] if i < len(row) else None for row in rows] for i in range(len(headers))])
+            (c, DataProfiler._to_numeric(all_col_values[i]))
+            for i, c in enumerate(columns)
             if c.dtype in ("int64", "float64")
         ]
         for i in range(len(numeric_cols)):

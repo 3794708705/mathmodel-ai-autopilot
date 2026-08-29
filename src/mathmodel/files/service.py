@@ -86,8 +86,13 @@ class FileService:
             raise ValueError(f"File too large: {size} bytes (max {MAX_FILE_SIZE_BYTES})")
         if size == 0:
             raise ValueError("Empty file")
+        # Check filename AND full path for traversal
+        full_path_str = str(path).lower()
         if ".." in name or "/" in name or "\\" in name:
             raise ValueError(f"Unsafe filename: {name}")
+        # Check for directory traversal in the path
+        if ".." in full_path_str:
+            raise ValueError(f"Path traversal detected in: {full_path_str}")
 
     @staticmethod
     def _safe_filename(original: str) -> str:
