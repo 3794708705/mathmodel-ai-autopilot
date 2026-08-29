@@ -84,6 +84,7 @@ class SensitivityRun(BaseModel):
     variable_values: dict[str, float] = Field(default_factory=dict)
     solver_status: str = ""
     execution_real: bool = False
+    effective: bool = True  # False if perturbation did not change the compiled model
 
 
 class SensitivityExperiment(BaseModel):
@@ -194,6 +195,27 @@ class RepairType(str, Enum):
     MODEL_SWITCH_REQUIRED = "model_switch_required"
 
 
+class RepairAction(BaseModel):
+    """A single structured repair operation with source provenance.
+
+    Repairs that introduce new numeric values must cite a source_reference.
+    """
+
+    action_id: str = Field(default_factory=lambda: f"RA-{uuid4().hex[:8]}")
+    kind: str = Field(..., description="parameter_set | constraint_add | constraint_update | objective_update")
+    parameter_id: Optional[str] = None
+    new_value: Optional[float] = None
+    constraint_id: Optional[str] = None
+    constraint_expression: Optional[str] = None
+    constraint_relation: Optional[str] = None
+    constraint_rhs: Optional[float] = None
+    source_reference: str = Field(
+        default="",
+        description="Evidence/data reference justifying this action (required for new values)",
+    )
+    reason: str = ""
+
+
 class RepairPlan(BaseModel):
     """A plan for repairing a model."""
     plan_id: str = Field(default_factory=lambda: f"RP-{uuid4().hex[:8]}")
@@ -209,6 +231,10 @@ class RepairPlan(BaseModel):
     expected_effect: str = ""
     risk: str = "low"
     requires_model_switch: bool = False
+    actions: list[RepairAction] = Field(
+        default_factory=list,
+        description="Structured repair operations; applied in order",
+    )
 
 
 class ModelRevision(BaseModel):

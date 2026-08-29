@@ -88,6 +88,11 @@ class SensitivityAgent:
                     most_sensitive.append(exp.parameter_id)
                 else:
                     least_sensitive.append(exp.parameter_id)
+            elif exp.status == GateStatus.WARNING:
+                # Ineffective experiments must not be called "stable"
+                # — they are unmeasurable; exclude from both lists
+
+                pass
 
         return SensitivityReport(
             model_id=model.model_id,
@@ -128,38 +133,56 @@ class SensitivityAgent:
 
         # Compute elasticity: % change in objective / % change in parameter
         baseline_run = next((r for r in experiment.runs if abs(r.delta_pct) < 1e-9), None)
-        if baseline_run and baseline_run.objective_value:
-            # Use ±5% for elasticity
-            plus5 = next((r for r in experiment.runs if abs(r.delta_pct - 0.05) < 1e-9), None)
+        if baseline_run and baseline_run.objective_value and baseline_run.effective:
+            # Use ±5% for elasticity (only from effective runs)
+            plus5 = next((r for r in experiment.runs
+                          if abs(r.delta_pct - 0.05) < 1e-9 and r.effective), None)
             if plus5 and plus5.objective_value:
                 pct_change_obj = (plus5.objective_value - baseline_run.objective_value) / abs(baseline_run.objective_value)
                 pct_change_param = 0.05
                 experiment.elasticity = round(pct_change_obj / pct_change_param, 4)
 
-        experiment.status = GateStatus.PASS if all(
-            r.solver_status == "optimal" for r in experiment.runs if r.delta_pct != 0
-        ) else GateStatus.WARNING
+        # Determine experiment status
+        effective_runs = [r for r in experiment.runs if r.effective]
+        if not effective_runs:
+            # Perturbation had no effect on the compiled model — flag honestly
+            experiment.status = GateStatus.WARNING
+            experiment.interpretation = (
+                "Perturbations did not change the compiled model. "
+                "The parameter is likely not referenced by model expressions "
+                "(numeric constants used instead of parameter symbols). "
+                "Sensitivity result is NOT meaningful."
+            )
+        else:
+            experiment.status = GateStatus.PASS if all(
+                r.solver_status == "optimal" for r in effective_runs
+            ) else GateStatus.WARNING
 
         return experiment
 
     def _solve_with_perturbation(
         self, model: MathematicalModel, param: Parameter, value: float, delta: float
     ) -> SensitivityRun:
-        """Solve the model with a perturbed parameter value."""
+        """Solve the model with a perturbed parameter value.
+
+        Detects whether the perturbation actually changed the compiled model.
+        """
         # Create a copy of the model with the parameter value changed
         modified = model.model_copy(deep=True)
         for p in modified.parameters:
             if p.parameter_id == param.parameter_id:
                 p.value = value
 
-        # Update the objective/constraint expressions with new value
-        # For simple linear models, the parameter value is embedded in expressions
-        # We need to rebuild expressions with the perturbed value
+        # Update expressions that reference the parameter symbol
         modified = self._apply_parameter_value(modified, param, value)
 
-        compiled = SimpleLPCompiler.compile(modified)
-        compiled["model_id"] = modified.model_id
-        result = solve_lp_scipy(compiled)
+        # Compare compiled representation with baseline to verify effectiveness
+        baseline_compiled = SimpleLPCompiler.compile(model)
+        modified_compiled = SimpleLPCompiler.compile(modified)
+        effective = self._compiled_differs(baseline_compiled, modified_compiled)
+
+        modified_compiled["model_id"] = modified.model_id
+        result = solve_lp_scipy(modified_compiled)
 
         return SensitivityRun(
             parameter_id=param.parameter_id,
@@ -170,19 +193,58 @@ class SensitivityAgent:
             variable_values=result.variable_values,
             solver_status=result.status.value,
             execution_real=result.execution_real,
+            effective=effective,
         )
+
+    @staticmethod
+    def _compiled_differs(a: dict, b: dict) -> bool:
+        """Compare two compiled LP representations."""
+        for key in ("c", "A_ub", "b_ub", "A_eq", "b_eq", "bounds"):
+            if a.get(key) != b.get(key):
+                return True
+        return False
 
     def _apply_parameter_value(
         self, model: MathematicalModel, param: Parameter, value: float
     ) -> MathematicalModel:
-        """Replace parameter symbol with its numeric value in expressions."""
-        # Replace "p1" with "30.0" in all expressions
+        """Substitute a parameter's value into model expressions.
+
+        Handles both forms:
+        1. Symbol form: expression references `p1` → replace `p1` with value
+        2. Numeric form: expression embeds the baseline value as a constant
+           (e.g. `30*x1` with p1 baseline 30) → replace the standalone
+           constant token with the perturbed value
+        """
+        import re
+
         symbol = param.symbol
+        baseline = param.value
+
+        def substitute(expr: str) -> str:
+            # 1. Symbol substitution
+            if symbol in expr:
+                expr = re.sub(
+                    rf"\b{re.escape(symbol)}\b", str(value), expr
+                )
+            # 2. Numeric constant substitution (standalone baseline value)
+            if baseline is not None:
+                baseline_str = f"{baseline:g}"
+                expr = re.sub(
+                    rf"(?<![\w.]){re.escape(baseline_str)}(?![\w.])",
+                    f"{value:g}",
+                    expr,
+                )
+            return expr
+
         for obj in model.objectives:
-            obj.expression = obj.expression.replace(symbol, str(value))
+            obj.expression = substitute(obj.expression)
         for con in model.constraints:
-            con.expression = con.expression.replace(symbol, str(value))
+            con.expression = substitute(con.expression)
         return model
+
+    def _apply_param(self, model, param, value):
+        """Alias for _apply_parameter_value (used by robustness scenarios)."""
+        return self._apply_parameter_value(model, param, value)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -224,7 +286,6 @@ class RobustnessAgent:
         self, model: MathematicalModel, uncertain_parameters: Optional[list[str]]
     ) -> RobustnessExperiment:
         """Run base/optimistic/pessimistic scenarios."""
-        # Scenarios: ±20% on uncertain parameters
         params = [p for p in model.parameters if p.value is not None]
         if uncertain_parameters:
             params = [p for p in params if p.parameter_id in uncertain_parameters]
@@ -236,22 +297,32 @@ class RobustnessAgent:
             {"name": "stress", "delta": -0.50},
         ]
 
+        baseline_compiled = SimpleLPCompiler.compile(model)
         results = []
         failures = 0
+        effective_count = 0
         for scenario in scenarios:
             modified = model.model_copy(deep=True)
             for p in modified.parameters:
-                if p in [pp for pp in params]:
-                    # Apply delta to all uncertain params
-                    base_val = next(pp.value for pp in params if pp.parameter_id == p.parameter_id)
-                    if base_val is not None:
-                        new_val = base_val * (1 + scenario["delta"])
-                        if base_val >= 0 and new_val < 0:
-                            new_val = 0.0
-                        p.value = new_val
-                        modified = self._apply_param(modified, p, new_val)
+                base_val = next(
+                    (pp.value for pp in params if pp.parameter_id == p.parameter_id),
+                    None,
+                )
+                if base_val is not None:
+                    new_val = base_val * (1 + scenario["delta"])
+                    if base_val >= 0 and new_val < 0:
+                        new_val = 0.0
+                    p.value = new_val
+                    modified = self._apply_param(modified, p, new_val)
 
             compiled = SimpleLPCompiler.compile(modified)
+            effective = any(
+                compiled.get(k) != baseline_compiled.get(k)
+                for k in ("c", "A_ub", "b_ub", "A_eq", "b_eq", "bounds")
+            )
+            if effective:
+                effective_count += 1
+
             compiled["model_id"] = modified.model_id
             result = solve_lp_scipy(compiled)
             if result.status != SolverStatus.OPTIMAL:
@@ -260,7 +331,17 @@ class RobustnessAgent:
                 "scenario": scenario["name"],
                 "objective": result.objective_value,
                 "status": result.status.value,
+                "effective": effective,
             })
+
+        if effective_count == 0:
+            summary = (
+                "Perturbations had no effect on the compiled model — "
+                "expressions likely use numeric constants instead of parameter "
+                "symbols. Robustness result is NOT meaningful."
+            )
+        else:
+            summary = f"{failures} failures in {len(scenarios)} scenarios"
 
         return RobustnessExperiment(
             method=RobustnessMethod.SCENARIO_ANALYSIS,
@@ -270,7 +351,8 @@ class RobustnessAgent:
             seed=self._default_seed,
             results=results,
             failure_rate=failures / len(scenarios) if scenarios else 0.0,
-            summary=f"{failures} failures in {len(scenarios)} scenarios",
+            metrics={"effective_scenarios": effective_count},
+            summary=summary,
         )
 
     def _run_monte_carlo(
@@ -331,12 +413,27 @@ class RobustnessAgent:
         return self._run_monte_carlo(model, uncertain_parameters)
 
     def _apply_param(self, model, param, value):
-        """Replace parameter symbol in expressions."""
+        """Substitute parameter value (symbol or numeric constant form)."""
+        import re
         symbol = param.symbol
+        baseline = param.value
+
+        def substitute(expr: str) -> str:
+            if symbol in expr:
+                expr = re.sub(rf"\b{re.escape(symbol)}\b", str(value), expr)
+            if baseline is not None:
+                baseline_str = f"{baseline:g}"
+                expr = re.sub(
+                    rf"(?<![\w.]){re.escape(baseline_str)}(?![\w.])",
+                    f"{value:g}",
+                    expr,
+                )
+            return expr
+
         for obj in model.objectives:
-            obj.expression = obj.expression.replace(symbol, str(value))
+            obj.expression = substitute(obj.expression)
         for con in model.constraints:
-            con.expression = con.expression.replace(symbol, str(value))
+            con.expression = substitute(con.expression)
         return model
 
 
@@ -512,17 +609,77 @@ class ModelRepairAgent:
         model: MathematicalModel,
         plan: RepairPlan,
     ) -> MathematicalModel:
-        """Apply the repair plan to the model."""
+        """Apply the repair plan to the model.
+
+        Only applies structured RepairActions. Every action that introduces
+        a new numeric value MUST carry a source_reference. Actions without
+        provenance are rejected.
+        """
         if plan.requires_model_switch:
             # Don't silently switch — signal the caller
             raise ModelSwitchRequired("Model switch required — defer to ModelJury or human")
 
         modified = model.model_copy(deep=True)
 
-        if plan.repair_type == RepairType.CONSTRAINT_FIX:
-            # Add missing constraint: if constraint violated, tighten bounds
-            # For the broken-model fixture: add capacity constraint
-            pass  # Concrete repair applied by caller with specific fixture
+        if not plan.actions:
+            # No structured actions → refuse to guess
+            raise RepairSourceRequired(
+                f"RepairPlan {plan.plan_id} has no structured actions. "
+                "A repair must specify concrete, source-backed changes."
+            )
+
+        for action in plan.actions:
+            if action.kind == "parameter_set":
+                if action.parameter_id is None or action.new_value is None:
+                    raise RepairSourceRequired("parameter_set action missing parameter_id/new_value")
+                if not action.source_reference:
+                    raise RepairSourceRequired(
+                        f"Action {action.action_id} sets a new value without "
+                        "source_reference. Repairs must cite evidence."
+                    )
+                found = False
+                old_value = None
+                for p in modified.parameters:
+                    if p.parameter_id == action.parameter_id:
+                        old_value = p.value  # Capture old value BEFORE overwriting
+                        p.value = action.new_value
+                        p.source_reference = action.source_reference
+                        found = True
+                if not found:
+                    raise RepairSourceRequired(
+                        f"Action {action.action_id} references unknown parameter "
+                        f"{action.parameter_id}"
+                    )
+                modified = self._substitute_parameter(
+                    modified, action.parameter_id, action.new_value, old_value
+                )
+
+            elif action.kind == "constraint_add":
+                if not action.constraint_expression or action.constraint_rhs is None:
+                    raise RepairSourceRequired("constraint_add action missing expression/rhs")
+                if not action.source_reference:
+                    raise RepairSourceRequired(
+                        f"Action {action.action_id} adds a constraint without "
+                        "source_reference. Repairs must cite evidence."
+                    )
+                from mathmodel.domain.math_model import Constraint, ConstraintRelation
+                relation = {
+                    "le": ConstraintRelation.LE,
+                    "ge": ConstraintRelation.GE,
+                    "eq": ConstraintRelation.EQ,
+                }.get((action.constraint_relation or "le").lower(), ConstraintRelation.LE)
+                new_constraint = Constraint(
+                    constraint_id=action.constraint_id or f"CON-REPAIR-{len(modified.constraints) + 1}",
+                    name=f"Repair constraint {len(modified.constraints) + 1}",
+                    expression=action.constraint_expression,
+                    relation=relation,
+                    rhs=action.constraint_rhs,
+                    source=action.source_reference,
+                )
+                modified.constraints.append(new_constraint)
+
+            else:
+                raise RepairSourceRequired(f"Unsupported repair action kind: {action.kind}")
 
         modified.version += 1
         modified.metadata = dict(modified.metadata or {})
@@ -531,6 +688,44 @@ class ModelRepairAgent:
 
         return modified
 
+    def _substitute_parameter(
+        self, model: MathematicalModel, parameter_id: str, value: float,
+        old_value: Optional[float] = None,
+    ) -> MathematicalModel:
+        """Substitute a parameter's new value into model expressions."""
+        import re
+
+        for p in model.parameters:
+            if p.parameter_id == parameter_id:
+                symbol = p.symbol
+                # Substitute symbol references
+                for obj in model.objectives:
+                    if symbol in obj.expression:
+                        obj.expression = re.sub(
+                            rf"\b{re.escape(symbol)}\b", str(value), obj.expression
+                        )
+                for con in model.constraints:
+                    if symbol in con.expression:
+                        con.expression = re.sub(
+                            rf"\b{re.escape(symbol)}\b", str(value), con.expression
+                        )
+                # Also substitute the old baseline numeric constant if present
+                if old_value is not None:
+                    old_str = f"{old_value:g}"
+                    for obj in model.objectives:
+                        obj.expression = re.sub(
+                            rf"(?<![\w.]){re.escape(old_str)}(?![\w.])",
+                            f"{value:g}",
+                            obj.expression,
+                        )
+                    for con in model.constraints:
+                        con.expression = re.sub(
+                            rf"(?<![\w.]){re.escape(old_str)}(?![\w.])",
+                            f"{value:g}",
+                            con.expression,
+                        )
+        return model
+
     @property
     def repair_count(self) -> int:
         return self._repair_count
@@ -538,6 +733,11 @@ class ModelRepairAgent:
     @property
     def max_reached(self) -> bool:
         return self._repair_count >= self.MAX_REPAIR_ITERATIONS
+
+
+class RepairSourceRequired(Exception):
+    """Raised when a repair action lacks source provenance or is invalid."""
+    pass
 
 
 class ModelSwitchRequired(Exception):
