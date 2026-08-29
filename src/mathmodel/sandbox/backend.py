@@ -48,12 +48,14 @@ class SandboxLimits:
 @dataclass
 class ExecutionRecord:
     """Record of a sandbox execution."""
+
     run_id: str = field(default_factory=lambda: f"RUN-{uuid4().hex[:8]}")
     project_id: Optional[str] = None
     agent_run_id: Optional[str] = None
     code_hash: str = ""
     code_version: str = ""
     backend: str = ""
+    backend_type: str = ""  # "local_test", "docker", "mock"
     environment: str = ""
     started_at: Optional[datetime] = None
     finished_at: Optional[datetime] = None
@@ -66,6 +68,8 @@ class ExecutionRecord:
     artifacts: list[str] = field(default_factory=list)
     metrics: dict[str, Any] = field(default_factory=dict)
     is_mock: bool = False
+    execution_real: bool = False  # True if real Python/subprocess executed
+    production_safe: bool = False  # True only for Docker/production backends
     status: ExecutionStatus = ExecutionStatus.PENDING
 
     @staticmethod
@@ -123,9 +127,13 @@ class LocalTestSandboxBackend(SandboxBackend):
         """Execute code in a subprocess with basic isolation."""
         record = ExecutionRecord(
             backend=self.backend_name,
+            backend_type="local_test",
             code_hash=ExecutionRecord.hash_code(code),
             started_at=datetime.now(timezone.utc),
             status=ExecutionStatus.RUNNING,
+            execution_real=True,  # Real subprocess execution
+            production_safe=False,  # Local = not production safe
+            is_mock=False,  # Not a mock — real execution
         )
 
         # Create isolated working directory
@@ -143,6 +151,25 @@ class LocalTestSandboxBackend(SandboxBackend):
                     dest.parent.mkdir(parents=True, exist_ok=True)
                     dest.write_text(content, encoding="utf-8")
 
+            # Build minimal environment — only allowlisted vars
+            allowed_env_prefixes = (
+                "PATH", "PATHEXT", "SYSTEMROOT", "TMP", "TEMP",
+                "USERPROFILE", "HOMEDRIVE", "HOMEPATH", "HOME",
+                "LANG", "LC_", "PYTHON", "CONDA",
+            )
+            # Start with minimal env
+            sandbox_env = {
+                "HOME": work_dir,
+                "TMP": work_dir,
+                "TEMP": work_dir,
+                "PYTHONPATH": "",
+                "PYTHONUNBUFFERED": "1",
+            }
+            # Add allowed host env vars
+            for key, value in os.environ.items():
+                if any(key.startswith(prefix) for prefix in allowed_env_prefixes):
+                    sandbox_env[key] = value
+
             start = time.time()
             try:
                 result = subprocess.run(
@@ -151,12 +178,7 @@ class LocalTestSandboxBackend(SandboxBackend):
                     text=True,
                     timeout=limits.timeout_seconds,
                     cwd=work_dir,
-                    env={
-                        **{k: v for k, v in os.environ.items()
-                           if not k.startswith(("DSH_", "OPENAI_", "ANTHROPIC_", "GOOGLE_"))},
-                        "PYTHONPATH": "",
-                        "HOME": work_dir,
-                    },
+                    env=sandbox_env,
                 )
                 elapsed = time.time() - start
 

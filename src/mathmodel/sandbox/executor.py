@@ -73,8 +73,12 @@ class SandboxExecutor:
                 code_hash=ExecutionRecord.hash_code(code),
                 agent_run_id=agent_run_id,
                 backend=self._backend.backend_name,
+                backend_type="security_check",
                 status=ExecutionStatus.SECURITY_VIOLATION,
                 stderr=f"Security check failed: {'; '.join(issues)}",
+                execution_real=False,
+                production_safe=False,
+                is_mock=False,
             )
             return record
 
@@ -85,7 +89,7 @@ class SandboxExecutor:
             input_files=input_files,
         )
         record.agent_run_id = agent_run_id
-        record.is_mock = not self._backend.production_safe
+        # execution_real and production_safe already set by backend
 
         return record
 

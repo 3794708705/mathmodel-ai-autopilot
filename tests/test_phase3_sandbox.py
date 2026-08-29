@@ -160,5 +160,29 @@ with open("result.txt", "w") as f:
     def test_executor_is_mock_flag(self):
         executor = SandboxExecutor()
         record = run_async(executor.execute("print('test')"))
-        # Local backend → is_mock = True (not production safe)
-        assert record.is_mock is True
+        # Local backend: real execution, NOT mock
+        assert record.is_mock is False
+        assert record.execution_real is True
+        assert record.production_safe is False
+        assert record.backend_type == "local_test"
+
+    def test_real_local_execution_not_mock(self):
+        """Real local execution must not be marked as mock."""
+        executor = SandboxExecutor()
+        record = run_async(executor.execute("print('real')"))
+        assert record.execution_real is True
+        assert record.is_mock is False
+
+    def test_local_backend_not_production_safe(self):
+        """Local backend must remain production_safe=False."""
+        executor = SandboxExecutor()
+        record = run_async(executor.execute("print('test')"))
+        assert record.production_safe is False
+
+    def test_security_violation_not_real_execution(self):
+        """Security violation should not be marked as real execution."""
+        executor = SandboxExecutor()
+        code = 'import os; os.system("echo")'
+        record = run_async(executor.execute(code))
+        assert record.status == ExecutionStatus.SECURITY_VIOLATION
+        assert record.execution_real is False

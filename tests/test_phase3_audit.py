@@ -229,7 +229,10 @@ class TestSandboxExecutionTruth:
 
     def test_mock_flag_on_local_backend(self):
         record = run_async(SandboxExecutor().execute("print('test')"))
-        assert record.is_mock is True  # Local backend is not production safe
+        # Local backend: real execution, NOT mock, but NOT production safe
+        assert record.is_mock is False
+        assert record.execution_real is True
+        assert record.production_safe is False
 
     def test_stdout_captured(self):
         record = run_async(SandboxExecutor().execute("print('hello sandbox')"))
