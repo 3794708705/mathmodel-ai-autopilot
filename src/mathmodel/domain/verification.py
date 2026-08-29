@@ -53,6 +53,7 @@ class ValidationReport(BaseModel):
 
     validation_id: str = Field(default_factory=lambda: f"VR-{uuid4().hex[:8]}")
     model_id: str = ""
+    model_version: Optional[int] = None
     solver_run_id: str = ""
     overall_status: GateStatus = GateStatus.FAIL
 
@@ -104,6 +105,7 @@ class SensitivityReport(BaseModel):
     """Complete sensitivity report."""
     report_id: str = Field(default_factory=lambda: f"SR-{uuid4().hex[:8]}")
     model_id: str = ""
+    model_version: Optional[int] = None
     experiments: list[SensitivityExperiment] = Field(default_factory=list)
     most_sensitive_parameters: list[str] = Field(default_factory=list)
     least_sensitive_parameters: list[str] = Field(default_factory=list)
@@ -144,6 +146,7 @@ class RobustnessReport(BaseModel):
     """Complete robustness report."""
     report_id: str = Field(default_factory=lambda: f"RR-{uuid4().hex[:8]}")
     model_id: str = ""
+    model_version: Optional[int] = None
     experiments: list[RobustnessExperiment] = Field(default_factory=list)
     summary: str = ""
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

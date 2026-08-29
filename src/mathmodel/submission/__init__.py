@@ -203,6 +203,7 @@ class SubmissionCheckAgent:
         citation_verifier: Optional[CitationVerifier] = None,
         current_model_version: Optional[int] = None,
         source_values: Optional[dict[str, Any]] = None,
+        red_team_report: Optional[Any] = None,
     ):
         self._profile = profile
         self._evidence = evidence or EvidenceStore()
@@ -211,11 +212,21 @@ class SubmissionCheckAgent:
         self._citation_verifier = citation_verifier
         self._current_model_version = current_model_version
         self._source_values = source_values or {}
+        self._red_team_report = red_team_report
 
     def check(self, paper: PaperIR) -> SubmissionCheckResult:
         failures: list[str] = []
         warnings: list[str] = []
         checks: list[dict[str, Any]] = []
+
+        # 0. Unresolved RedTeam CRITICAL issues block submission
+        if self._red_team_report is not None:
+            critical_count = getattr(self._red_team_report, "critical_count", 0)
+            if critical_count > 0:
+                failures.append(
+                    f"Unresolved RedTeam CRITICAL issues: {critical_count}"
+                )
+            checks.append({"check": "red_team", "ok": critical_count == 0})
 
         # 1. Abstract present
         if not paper.abstract:
@@ -258,6 +269,25 @@ class SubmissionCheckAgent:
         checks.append({
             "check": "stale_model",
             "ok": not any("stale paper" in f for f in failures),
+        })
+
+        # 3c2. Stale evidence detection: claims backed by evidence from
+        # older model versions than the current model are stale.
+        if self._current_model_version is not None:
+            for claim in self._evidence.list_claims():
+                for eid in claim.evidence_ids:
+                    ref = self._evidence.get_evidence(eid)
+                    if ref and ref.metadata.get("model_version") is not None:
+                        ev_version = int(ref.metadata["model_version"])
+                        if ev_version < int(self._current_model_version):
+                            failures.append(
+                                f"Claim {claim.claim_id} relies on evidence {eid} "
+                                f"from model v{ev_version} but current model is "
+                                f"v{self._current_model_version} — stale evidence"
+                            )
+        checks.append({
+            "check": "stale_evidence",
+            "ok": not any("stale evidence" in f for f in failures),
         })
 
         # 3d. Anonymity rules

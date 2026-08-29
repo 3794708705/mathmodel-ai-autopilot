@@ -268,6 +268,7 @@ def build_validation_report(
     issues: list[ValidationIssue] = []
     report = ValidationReport(
         model_id=model.model_id,
+        model_version=model.version,
         solver_run_id=result.solver_run_id,
         overall_status=GateStatus.PASS,
     )

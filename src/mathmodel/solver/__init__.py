@@ -33,6 +33,7 @@ class SolverResult:
 
     solver_run_id: str = field(default_factory=lambda: f"SOLVER-{uuid4().hex[:8]}")
     model_id: str = ""
+    model_version: Optional[int] = None  # Version of the model that produced this
     solver: str = ""
     solver_version: str = ""
     status: SolverStatus = SolverStatus.UNKNOWN
@@ -164,6 +165,7 @@ class SimpleLPCompiler:
             "bounds": bounds,
             "variable_names": [v.symbol for v in model.variables],
             "maximize": model.objectives[0].sense == ObjectiveSense.MAXIMIZE if model.objectives else False,
+            "model_version": model.version,
         }
 
     @staticmethod
@@ -244,6 +246,7 @@ def solve_lp_scipy(compiled: dict[str, Any]) -> SolverResult:
 
         return SolverResult(
             model_id=compiled.get("model_id", ""),
+            model_version=compiled.get("model_version"),
             solver="scipy",
             solver_version="scipy.optimize.linprog",
             status=status_map.get(result.status, SolverStatus.UNKNOWN),

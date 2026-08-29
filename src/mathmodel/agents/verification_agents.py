@@ -96,6 +96,7 @@ class SensitivityAgent:
 
         return SensitivityReport(
             model_id=model.model_id,
+            model_version=model.version,
             experiments=experiments,
             most_sensitive_parameters=most_sensitive,
             least_sensitive_parameters=least_sensitive,
@@ -278,6 +279,7 @@ class RobustnessAgent:
 
         return RobustnessReport(
             model_id=model.model_id,
+            model_version=model.version,
             experiments=experiments,
             summary=f"{len(experiments)} robustness experiments",
         )
