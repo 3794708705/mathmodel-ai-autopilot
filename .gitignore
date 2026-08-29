@@ -46,7 +46,7 @@ logs/
 # Generated
 generated/
 output/
-submission/
+/submission/
 
 # Docker
 *.pid
