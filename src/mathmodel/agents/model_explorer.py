@@ -109,6 +109,17 @@ class ModelExplorer(BaseAgent):
 
             # Validate candidates
             errors = self._validate_candidates(output.candidates)
+            # Cross-object validation: candidate subproblems must reference real subproblems
+            if analysis:
+                subproblem_ids = {sp.subproblem_id for sp in analysis.subproblems}
+                for c in output.candidates:
+                    for sp_id in c.applicable_subproblems:
+                        if sp_id not in subproblem_ids:
+                            errors.append(AgentError(
+                                message=f"Candidate {c.candidate_id} references unknown "
+                                        f"subproblem {sp_id}",
+                                error_type="cross_reference",
+                            ))
             if errors:
                 return self._finish_result(
                     result,

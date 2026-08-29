@@ -33,10 +33,13 @@ dev = [
 ]
 
 [tool.pytest.ini_options]
+asyncio_mode = "auto"
 testpaths = ["tests"]
 pythonpath = ["src"]
 markers = [
     "asyncio: async test marker",
+    "integration: integration test",
+    "postgresql: requires PostgreSQL",
 ]
 
 [tool.setuptools.packages.find]

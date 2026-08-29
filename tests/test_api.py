@@ -1,32 +1,48 @@
 """Tests for API routes.
 
-These tests require FastAPI. They are skipped if FastAPI is not installed.
+Requires FastAPI, pytest-asyncio, and aiosqlite.
+Uses in-memory SQLite for database testing.
 """
 
 import uuid
 
 import pytest
+import pytest_asyncio
+from httpx import ASGITransport, AsyncClient
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-# Check if FastAPI is available
-try:
-    from fastapi import FastAPI
-    from httpx import ASGITransport, AsyncClient
-    FASTAPI_AVAILABLE = True
-except ImportError:
-    FASTAPI_AVAILABLE = False
-
-pytestmark = pytest.mark.skipif(
-    not FASTAPI_AVAILABLE,
-    reason="FastAPI is not installed",
-)
+from mathmodel.database import Base, reset_engines
+from mathmodel.main import app
 
 
-# Only import app if FastAPI is available
-if FASTAPI_AVAILABLE:
-    from mathmodel.main import app
+@pytest_asyncio.fixture(autouse=True)
+async def setup_db(monkeypatch):
+    """Create test database tables and override DB URL."""
+    monkeypatch.setenv("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
+
+    # Clear settings cache so new URL is picked up
+    from mathmodel.config import get_settings
+    get_settings.cache_clear()
+
+    reset_engines()
+
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+
+    import mathmodel.database as db_module
+    db_module._async_engine = engine
+    db_module._async_session_factory = session_factory
+
+    yield
+
+    await engine.dispose()
+    reset_engines()
 
 
-@pytest.fixture
+@pytest_asyncio.fixture
 async def client():
     """Create an async HTTP client for testing."""
     transport = ASGITransport(app=app)
@@ -37,7 +53,6 @@ async def client():
 class TestHealthEndpoint:
     """Test health check endpoint."""
 
-    @pytest.mark.asyncio
     async def test_health_check(self, client):
         response = await client.get("/api/v1/health")
         assert response.status_code == 200
@@ -50,7 +65,6 @@ class TestHealthEndpoint:
 class TestConfigEndpoint:
     """Test configuration endpoint."""
 
-    @pytest.mark.asyncio
     async def test_get_config(self, client):
         response = await client.get("/api/v1/config")
         assert response.status_code == 200
@@ -65,7 +79,6 @@ class TestConfigEndpoint:
 class TestProvidersEndpoint:
     """Test providers endpoint."""
 
-    @pytest.mark.asyncio
     async def test_list_providers(self, client):
         response = await client.get("/api/v1/providers")
         assert response.status_code == 200
@@ -81,8 +94,7 @@ class TestProvidersEndpoint:
 class TestProblemCRUD:
     """Test ProblemState CRUD endpoints."""
 
-    @pytest.mark.asyncio
-    async def test_create_problem(self, client, db_session):
+    async def test_create_problem(self, client):
         """Test creating a problem."""
         response = await client.post(
             "/api/v1/problems",
@@ -100,8 +112,7 @@ class TestProblemCRUD:
         assert data["status"] == "pending"
         assert "id" in data
 
-    @pytest.mark.asyncio
-    async def test_create_problem_minimal(self, client, db_session):
+    async def test_create_problem_minimal(self, client):
         """Test creating a problem with minimal fields."""
         response = await client.post(
             "/api/v1/problems",
@@ -112,8 +123,7 @@ class TestProblemCRUD:
         assert data["current_stage"] == "ingest"
         assert data["status"] == "pending"
 
-    @pytest.mark.asyncio
-    async def test_list_problems(self, client, db_session):
+    async def test_list_problems(self, client):
         """Test listing problems."""
         await client.post(
             "/api/v1/problems",
@@ -127,8 +137,7 @@ class TestProblemCRUD:
         assert "total" in data
         assert data["total"] >= 1
 
-    @pytest.mark.asyncio
-    async def test_list_problems_pagination(self, client, db_session):
+    async def test_list_problems_pagination(self, client):
         """Test pagination parameters."""
         response = await client.get("/api/v1/problems?skip=0&limit=10")
         assert response.status_code == 200
@@ -136,8 +145,7 @@ class TestProblemCRUD:
         response = await client.get("/api/v1/problems?skip=0&limit=101")
         assert response.status_code == 422
 
-    @pytest.mark.asyncio
-    async def test_get_problem(self, client, db_session):
+    async def test_get_problem(self, client):
         """Test getting a specific problem."""
         create_resp = await client.post(
             "/api/v1/problems",
@@ -149,15 +157,13 @@ class TestProblemCRUD:
         assert response.status_code == 200
         assert response.json()["title"] == "Get Test"
 
-    @pytest.mark.asyncio
-    async def test_get_problem_not_found(self, client, db_session):
+    async def test_get_problem_not_found(self, client):
         """Test getting a non-existent problem."""
         fake_id = str(uuid.uuid4())
         response = await client.get(f"/api/v1/problems/{fake_id}")
         assert response.status_code == 404
 
-    @pytest.mark.asyncio
-    async def test_update_problem(self, client, db_session):
+    async def test_update_problem(self, client):
         """Test updating a problem."""
         create_resp = await client.post(
             "/api/v1/problems",
@@ -174,8 +180,22 @@ class TestProblemCRUD:
         assert data["title"] == "Updated Title"
         assert data["current_stage"] == "understand"
 
-    @pytest.mark.asyncio
-    async def test_update_problem_not_found(self, client, db_session):
+    async def test_invalid_stage_transition(self, client):
+        """Test that invalid stage transitions are rejected."""
+        create_resp = await client.post(
+            "/api/v1/problems",
+            json={"title": "Transition Test"},
+        )
+        problem_id = create_resp.json()["id"]
+
+        # Try to jump from INGEST to SOLVE (invalid)
+        response = await client.patch(
+            f"/api/v1/problems/{problem_id}",
+            json={"current_stage": "solve"},
+        )
+        assert response.status_code == 422
+
+    async def test_update_problem_not_found(self, client):
         """Test updating a non-existent problem."""
         fake_id = str(uuid.uuid4())
         response = await client.patch(
@@ -184,8 +204,7 @@ class TestProblemCRUD:
         )
         assert response.status_code == 404
 
-    @pytest.mark.asyncio
-    async def test_delete_problem(self, client, db_session):
+    async def test_delete_problem(self, client):
         """Test deleting a problem."""
         create_resp = await client.post(
             "/api/v1/problems",
@@ -199,8 +218,7 @@ class TestProblemCRUD:
         get_resp = await client.get(f"/api/v1/problems/{problem_id}")
         assert get_resp.status_code == 404
 
-    @pytest.mark.asyncio
-    async def test_delete_problem_not_found(self, client, db_session):
+    async def test_delete_problem_not_found(self, client):
         """Test deleting a non-existent problem."""
         fake_id = str(uuid.uuid4())
         response = await client.delete(f"/api/v1/problems/{fake_id}")

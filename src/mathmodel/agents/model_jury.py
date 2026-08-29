@@ -221,10 +221,22 @@ class ModelJury(BaseAgent):
         # Convert string keys to enum keys
         raw_scores: dict[JuryDimension, float] = {}
         reasoning: dict[JuryDimension, str] = {}
+        missing_dimensions: list[str] = []
 
         for dim in JuryDimension:
-            raw_scores[dim] = llm_output.raw_scores.get(dim.value, 50.0)
-            reasoning[dim] = llm_output.reasoning.get(dim.value, "")
+            if dim.value in llm_output.raw_scores:
+                raw_scores[dim] = llm_output.raw_scores[dim.value]
+                reasoning[dim] = llm_output.reasoning.get(dim.value, "")
+            else:
+                missing_dimensions.append(dim.value)
+                raw_scores[dim] = 50.0
+                reasoning[dim] = ""
+
+        if missing_dimensions:
+            logger.warning(
+                "ModelJury: LLM omitted dimensions: %s. Defaulting to 50.0.",
+                missing_dimensions,
+            )
 
         # Compute weighted scores deterministically
         return compute_jury_scores(

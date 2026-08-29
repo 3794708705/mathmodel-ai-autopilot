@@ -86,6 +86,10 @@ class RoutingPolicy:
         "coding_requirement": {
             ComplexityTier.CRITICAL: ModelTier.FLAGSHIP_HIGH,
         },
+        "multimodal_requirement": {
+            ComplexityTier.HIGH: ModelTier.FLAGSHIP_HIGH,
+            ComplexityTier.CRITICAL: ModelTier.FLAGSHIP_XHIGH,
+        },
     }
 
     def __init__(self):
@@ -187,6 +191,7 @@ class RoutingPolicy:
             "long_context_requirement": profile.long_context_requirement,
             "blast_radius": profile.blast_radius,
             "coding_requirement": profile.coding_requirement,
+            "multimodal_requirement": profile.multimodal_requirement,
         }
 
         for dim_name, dim_value in dimension_values.items():
