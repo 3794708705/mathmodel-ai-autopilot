@@ -128,6 +128,15 @@ def verify_figure(figure: FigureRecord) -> list[str]:
         issues.append(f"{figure.figure_id}: artifact file does not exist")
     elif os.path.getsize(figure.artifact_path) == 0:
         issues.append(f"{figure.figure_id}: artifact file is empty")
+    elif figure.hash:
+        # Verify recorded hash matches current file bytes
+        import hashlib
+        with open(figure.artifact_path, "rb") as f:
+            actual = hashlib.sha256(f.read()).hexdigest()[:16]
+        if actual != figure.hash:
+            issues.append(
+                f"{figure.figure_id}: hash mismatch (recorded {figure.hash}, actual {actual})"
+            )
     if not figure.source_data_ids and not figure.source_execution_ids:
         issues.append(f"{figure.figure_id}: no data or execution source")
     return issues
@@ -184,9 +193,18 @@ class TableRegistry:
         return list(self._tables.values())
 
 
-def verify_table(table: TableRecord) -> list[str]:
-    """Deterministic table integrity checks."""
+def verify_table(
+    table: TableRecord,
+    source_values: Optional[dict[str, Any]] = None,
+) -> list[str]:
+    """Deterministic table integrity checks.
+
+    source_values: {source_id: authoritative value}. When provided,
+    numeric cells whose source_id is in this map must match the
+    authoritative value (formatting tolerance 1e-9).
+    """
     issues = []
+    source_values = source_values or {}
     for row in table.rows:
         if len(row) != len(table.headers):
             issues.append(
@@ -199,4 +217,12 @@ def verify_table(table: TableRecord) -> list[str]:
                     issues.append(
                         f"{table.table_id}: numeric cell value={cell.value} has no source_id"
                     )
+            elif cell.source_id in source_values:
+                authoritative = source_values[cell.source_id]
+                if isinstance(cell.value, (int, float)) and isinstance(authoritative, (int, float)):
+                    if abs(float(cell.value) - float(authoritative)) > 1e-9:
+                        issues.append(
+                            f"{table.table_id}: cell value {cell.value} does not match "
+                            f"source {cell.source_id}={authoritative}"
+                        )
     return issues

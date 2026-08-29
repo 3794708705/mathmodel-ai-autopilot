@@ -57,6 +57,37 @@ def _latex_escape(text: str) -> str:
     return text
 
 
+# Dangerous LaTeX primitives that must never pass through from content
+FORBIDDEN_TEX_PATTERNS = [
+    r"\input",
+    r"\include",
+    r"\write18",
+    r"\write",
+    r"\openin",
+    r"\openout",
+    r"\read",
+    r"\catcode",
+    r"\immediate\write",
+    r"\pdfprimitive",
+    r"\special{",
+]
+
+
+def _check_latex_injection(tex: str) -> list[str]:
+    """Detect dangerous LaTeX commands. Returns list of issues."""
+    issues = []
+    lowered = tex.lower()
+    for pattern in FORBIDDEN_TEX_PATTERNS:
+        if pattern.lower() in lowered:
+            issues.append(f"Dangerous LaTeX command detected: {pattern}")
+    return issues
+
+
+class LaTeXInjectionError(Exception):
+    """Raised when paper content attempts LaTeX injection."""
+    pass
+
+
 class LaTeXRenderer:
     """Renders PaperIR into LaTeX and optionally compiles to PDF."""
 
@@ -104,7 +135,14 @@ class LaTeXRenderer:
             lines.extend(self._render_section(appendix))
 
         lines.append(r"\end{document}")
-        return "\n".join(lines)
+        tex = "\n".join(lines)
+
+        # Security: block dangerous LaTeX commands in the final document
+        issues = _check_latex_injection(tex)
+        if issues:
+            raise LaTeXInjectionError("; ".join(issues))
+
+        return tex
 
     def _render_section(self, section: PaperSection) -> list[str]:
         lines = []

@@ -93,23 +93,48 @@ class UnsupportedClaimChecker:
 
 
 class NumericalConsistencyChecker:
-    """Verifies paper numbers match source numbers (formatting tolerance only)."""
+    """Verifies paper numbers match source numbers.
+
+    Policy:
+    - Formatting: 700.0 == 700 == 700.00 (absolute match)
+    - Rounding: paper 0.333 matches source 0.333333333 (tolerance derived
+      from the paper's decimal precision — NOT arbitrary closeness)
+    - Percentage trap: source 0.35 matches paper "35%" (rate semantics);
+      source 35 does NOT match paper "35%" (no implicit /100 for values > 1)
+    """
 
     @staticmethod
     def check_consistency(source_value: float, paper_text: str) -> bool:
-        """Check whether a source value appears in the paper text.
-
-        Formatting tolerance: 700.0 vs 700 vs 700.00 all match.
-        Different value (701) does not.
-        """
-        # Normalize: find numbers in text and compare numerically
-        for match in re.finditer(r"\d+\.?\d*", paper_text):
+        """Check whether a source value appears in the paper text."""
+        for match in re.finditer(r"\d+\.?\d*\s*%?", paper_text):
+            token = match.group()
+            is_percent = token.endswith("%")
+            num_part = token.rstrip("%")
             try:
-                paper_val = float(match.group())
-                if abs(paper_val - source_value) < 1e-9:
-                    return True
+                paper_val = float(num_part)
             except ValueError:
                 continue
+
+            if is_percent:
+                # Percentage semantics: paper value = paper_val / 100
+                # Only valid when the source is itself a rate in [0, 1]
+                if 0.0 <= source_value <= 1.0:
+                    paper_rate = paper_val / 100.0
+                    if abs(paper_rate - source_value) < 1e-9:
+                        return True
+                # Source > 1 does NOT auto-match a percentage
+                continue
+
+            # Plain number: absolute formatting match
+            if abs(paper_val - source_value) < 1e-9:
+                return True
+
+            # Rounding tolerance based on paper decimal precision
+            decimals = len(num_part.split(".")[1]) if "." in num_part else 0
+            tol = 0.5 * (10 ** (-decimals)) + 1e-9
+            if abs(paper_val - source_value) <= tol:
+                return True
+
         return False
 
     def check_all(
@@ -135,6 +160,36 @@ class NumericalConsistencyChecker:
                 )
         return issues
 
+    @staticmethod
+    def check_improvement(
+        baseline: float,
+        improved: float,
+        paper_text: str,
+    ) -> list[str]:
+        """Verify a paper's improvement claim by deterministic calculation.
+
+        baseline=100, improved=120 → true improvement = 20%.
+        Paper claiming "120% improvement" must FAIL.
+        """
+        issues = []
+        if baseline == 0:
+            return ["Improvement baseline is zero — cannot compute percentage"]
+
+        actual_pct = (improved - baseline) / baseline * 100.0
+
+        # Find percentage claims in the text
+        for match in re.finditer(r"(\d+\.?\d*)\s*%", paper_text):
+            claimed = float(match.group(1))
+            if abs(claimed - actual_pct) <= 0.05 + 1e-9:
+                # Paper reports the correct improvement
+                return []
+
+        issues.append(
+            f"Paper improvement claim does not match deterministic calculation: "
+            f"expected {actual_pct:.2f}% (from {baseline}→{improved})"
+        )
+        return issues
+
 
 class SubmissionCheckAgent:
     """Runs deterministic submission checks."""
@@ -146,12 +201,16 @@ class SubmissionCheckAgent:
         figures: Optional[FigureRegistry] = None,
         tables: Optional[TableRegistry] = None,
         citation_verifier: Optional[CitationVerifier] = None,
+        current_model_version: Optional[int] = None,
+        source_values: Optional[dict[str, Any]] = None,
     ):
         self._profile = profile
         self._evidence = evidence or EvidenceStore()
         self._figures = figures or FigureRegistry()
         self._tables = tables or TableRegistry()
         self._citation_verifier = citation_verifier
+        self._current_model_version = current_model_version
+        self._source_values = source_values or {}
 
     def check(self, paper: PaperIR) -> SubmissionCheckResult:
         failures: list[str] = []
@@ -176,6 +235,49 @@ class SubmissionCheckAgent:
             failures.extend(claim_issues)
         checks.append({"check": "claim_gate", "ok": not claim_issues})
 
+        # 3b. Claim evidence-type matching
+        type_mismatch_claims = self._evidence.claims_with_invalid_evidence_type()
+        for claim in type_mismatch_claims:
+            failures.append(
+                f"Claim {claim.claim_id} ({claim.claim_type.value}) lacks "
+                f"type-appropriate evidence"
+            )
+        checks.append({
+            "check": "claim_evidence_types",
+            "ok": not type_mismatch_claims,
+        })
+
+        # 3c. Stale model detection
+        paper_model_version = paper.metadata.get("model_version")
+        if self._current_model_version is not None and paper_model_version is not None:
+            if int(paper_model_version) < int(self._current_model_version):
+                failures.append(
+                    f"Paper built from model v{paper_model_version} but current "
+                    f"model is v{self._current_model_version} — stale paper"
+                )
+        checks.append({
+            "check": "stale_model",
+            "ok": not any("stale paper" in f for f in failures),
+        })
+
+        # 3d. Anonymity rules
+        if self._profile.anonymity_rules:
+            forbidden_terms = self._profile.anonymity_rules.get("forbidden_terms", [])
+            if forbidden_terms:
+                paper_text = paper.abstract + " " + " ".join(
+                    b.text for s in paper.sections for b in s.content_blocks
+                )
+                lower_text = paper_text.lower()
+                for term in forbidden_terms:
+                    if term.lower() in lower_text:
+                        failures.append(
+                            f"Anonymity violation: paper contains '{term}'"
+                        )
+        checks.append({
+            "check": "anonymity",
+            "ok": not any("Anonymity violation" in f for f in failures),
+        })
+
         # 4. Unsupported claim scan
         unsupported = UnsupportedClaimChecker().check(paper, self._evidence)
         if unsupported:
@@ -199,7 +301,7 @@ class SubmissionCheckAgent:
             if tab is None:
                 failures.append(f"Paper references unknown table: {tab_id}")
                 continue
-            issues = verify_table(tab)
+            issues = verify_table(tab, source_values=self._source_values)
             if issues:
                 failures.extend(issues)
         checks.append({"check": "tables", "ok": True})

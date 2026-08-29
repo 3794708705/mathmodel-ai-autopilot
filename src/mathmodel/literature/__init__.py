@@ -52,19 +52,41 @@ class Citation(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+def normalize_doi(doi: str) -> str:
+    """Normalize a DOI to canonical lowercase bare form.
+
+    Handles:
+    - 10.xxxx/ABC
+    - https://doi.org/10.xxxx/abc
+    - doi:10.xxxx/abc
+    """
+    doi = doi.strip()
+    # Strip URL prefix
+    for prefix in ("https://doi.org/", "http://doi.org/", "doi.org/", "doi:"):
+        if doi.lower().startswith(prefix):
+            doi = doi[len(prefix):]
+            break
+    return doi.lower().strip()
+
+
 class LiteratureStore:
     def __init__(self):
         self._records: dict[str, LiteratureRecord] = {}
         self._citations: dict[str, Citation] = {}
+        self._doi_index: dict[str, str] = {}  # normalized doi -> literature_id
 
     def add_record(self, record: LiteratureRecord) -> None:
-        # Duplicate DOI detection
+        # Duplicate DOI detection (normalized: case/URL-form insensitive)
         if record.doi:
-            for existing in self._records.values():
-                if existing.doi == record.doi and existing.literature_id != record.literature_id:
-                    raise ValueError(
-                        f"Duplicate DOI {record.doi}: {existing.literature_id} vs {record.literature_id}"
-                    )
+            norm_doi = normalize_doi(record.doi)
+            existing_id = self._doi_index.get(norm_doi)
+            if existing_id and existing_id != record.literature_id:
+                existing = self._records[existing_id]
+                raise ValueError(
+                    f"Duplicate DOI {record.doi} (normalized: {norm_doi}): "
+                    f"{existing.literature_id} vs {record.literature_id}"
+                )
+            self._doi_index[norm_doi] = record.literature_id
         self._records[record.literature_id] = record
 
     def get_record(self, literature_id: str) -> Optional[LiteratureRecord]:

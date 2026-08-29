@@ -85,6 +85,19 @@ class Claim(BaseModel):
 class EvidenceStore:
     """Stores and validates evidence and claims."""
 
+    # Required evidence types per claim type (for important claims).
+    # e.g. a NUMERICAL claim must cite SOLVER_RESULT or EXECUTION,
+    # not just a PROBLEM_FACT.
+    CLAIM_TYPE_EVIDENCE_REQUIREMENTS: dict[ClaimType, list[EvidenceSourceType]] = {
+        ClaimType.NUMERICAL: [EvidenceSourceType.SOLVER_RESULT, EvidenceSourceType.EXECUTION],
+        ClaimType.COMPARATIVE: [EvidenceSourceType.SOLVER_RESULT, EvidenceSourceType.EXECUTION],
+        ClaimType.MATHEMATICAL: [EvidenceSourceType.EQUATION, EvidenceSourceType.MATHEMATICAL_MODEL, EvidenceSourceType.DERIVATION],
+        ClaimType.FACTUAL: [EvidenceSourceType.PROBLEM_FACT, EvidenceSourceType.DATA],
+        ClaimType.INTERPRETIVE: [EvidenceSourceType.VALIDATION, EvidenceSourceType.SENSITIVITY, EvidenceSourceType.ROBUSTNESS, EvidenceSourceType.RED_TEAM],
+        ClaimType.LITERATURE_SUPPORTED: [EvidenceSourceType.LITERATURE],
+        ClaimType.CONCLUSION: [EvidenceSourceType.VALIDATION, EvidenceSourceType.SOLVER_RESULT],
+    }
+
     def __init__(self):
         self._evidence: dict[str, EvidenceRef] = {}
         self._claims: dict[str, Claim] = {}
@@ -105,6 +118,16 @@ class EvidenceStore:
     def list_evidence(self) -> list[EvidenceRef]:
         return list(self._evidence.values())
 
+    def delete_evidence(self, evidence_id: str) -> None:
+        """Delete evidence and invalidate all claims referencing it."""
+        if evidence_id not in self._evidence:
+            raise KeyError(f"Unknown evidence ID: {evidence_id}")
+        del self._evidence[evidence_id]
+        # Invalidate dependent claims
+        for claim in self._claims.values():
+            if evidence_id in claim.evidence_ids:
+                claim.verification_status = ClaimStatus.UNVERIFIED
+
     # ── Claim management ─────────────────────────────────────
 
     def register_claim(self, claim: Claim) -> None:
@@ -123,6 +146,30 @@ class EvidenceStore:
             claim.verification_status = ClaimStatus.UNSUPPORTED
 
         self._claims[claim.claim_id] = claim
+
+    def check_evidence_type_match(self, claim: Claim) -> bool:
+        """Whether the claim's evidence types match its claim type.
+
+        A NUMERICAL claim backed only by PROBLEM_FACT is not sufficient.
+        """
+        required = self.CLAIM_TYPE_EVIDENCE_REQUIREMENTS.get(claim.claim_type)
+        if not required:
+            return True
+        cited_types = {
+            self._evidence[eid].source_type
+            for eid in claim.evidence_ids
+            if eid in self._evidence
+        }
+        return bool(cited_types & set(required))
+
+    def claims_with_invalid_evidence_type(self) -> list[Claim]:
+        """Important claims whose evidence types do not match claim type."""
+        result = []
+        for claim in self._claims.values():
+            if claim.importance in ("critical", "high") and claim.evidence_ids:
+                if not self.check_evidence_type_match(claim):
+                    result.append(claim)
+        return result
 
     def get_claim(self, claim_id: str) -> Optional[Claim]:
         return self._claims.get(claim_id)
