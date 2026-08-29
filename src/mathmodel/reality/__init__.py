@@ -168,8 +168,17 @@ class ExternalRealityGate:
         if self._trace.failures:
             failures.append(f"Failures: {len(self._trace.failures)}")
 
+        # Semantic verification required but not performed → not fully verified
+        missing_semantic = (
+            self._context.semantic_verification_required
+            and self._trace.semantic_verifications == 0
+        )
+
         if failures:
             return RealityStatus.REALITY_FAILED
+
+        if missing_semantic:
+            return RealityStatus.REALITY_PARTIAL
 
         if self._trace.real_llm_calls > 0 and self._trace.real_search_queries > 0:
             return RealityStatus.REALITY_VERIFIED

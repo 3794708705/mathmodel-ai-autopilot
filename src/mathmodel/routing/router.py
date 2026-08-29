@@ -45,11 +45,19 @@ class ModelRouter:
         return self._policy.select_tier(profile)
 
     def get_provider_for_tier(
-        self, tier: ModelTier, preferred_provider: Optional[ProviderType] = None
+        self,
+        tier: ModelTier,
+        preferred_provider: Optional[ProviderType] = None,
+        strict: bool = False,
     ) -> BaseModelProvider:
-        """Get a provider instance appropriate for the given tier."""
+        """Get a provider instance appropriate for the given tier.
+
+        strict=True: raise ProviderUnavailableError instead of falling
+        back to Mock when a real provider's credential is missing.
+        Required when RealityContext.mock_allowed = False.
+        """
         provider_type = preferred_provider or self._get_default_provider_for_tier(tier)
-        provider = self._registry.get_provider(provider_type)
+        provider = self._registry.get_provider(provider_type, strict=strict)
 
         if provider.provider_name == "mock":
             logger.warning(
@@ -66,6 +74,7 @@ class ModelRouter:
         prompt: str,
         system_prompt: Optional[str] = None,
         preferred_provider: Optional[ProviderType] = None,
+        strict: bool = False,
         **kwargs,
     ) -> GenerationResponse:
         """Route a generation request through the model router.
@@ -74,7 +83,7 @@ class ModelRouter:
         appropriate provider.
         """
         tier, explanation = self.select_tier(profile)
-        provider = self.get_provider_for_tier(tier, preferred_provider)
+        provider = self.get_provider_for_tier(tier, preferred_provider, strict=strict)
 
         logger.info(
             "Routing task type=%s tier=%s provider=%s retry=%d reasons=%s",
