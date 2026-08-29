@@ -27,6 +27,45 @@ from mathmodel.providers.registry import get_provider_registry
 router = APIRouter(prefix="/api/v1", tags=["v1"])
 
 
+# ── Valid stage transitions ──────────────────────────────────
+# Phase 1: allow only forward transitions (no skip-ahead restriction yet)
+# Phase 2+: this will enforce the full state machine
+
+VALID_STAGE_TRANSITIONS: dict[ProblemStateStage, set[ProblemStateStage]] = {
+    ProblemStateStage.INGEST: {ProblemStateStage.UNDERSTAND},
+    ProblemStateStage.UNDERSTAND: {ProblemStateStage.DATA, ProblemStateStage.LITERATURE},
+    ProblemStateStage.DATA: {ProblemStateStage.LITERATURE, ProblemStateStage.EXPLORE},
+    ProblemStateStage.LITERATURE: {ProblemStateStage.EXPLORE},
+    ProblemStateStage.EXPLORE: {ProblemStateStage.SELECT},
+    ProblemStateStage.SELECT: {ProblemStateStage.MODEL},
+    ProblemStateStage.MODEL: {ProblemStateStage.SOLVE},
+    ProblemStateStage.SOLVE: {ProblemStateStage.VALIDATE},
+    ProblemStateStage.VALIDATE: {ProblemStateStage.SENSITIVITY, ProblemStateStage.RED_TEAM},
+    ProblemStateStage.SENSITIVITY: {ProblemStateStage.ROBUSTNESS},
+    ProblemStateStage.ROBUSTNESS: {ProblemStateStage.RED_TEAM},
+    ProblemStateStage.RED_TEAM: {ProblemStateStage.MODEL, ProblemStateStage.PAPER},
+    ProblemStateStage.PAPER: {ProblemStateStage.FINAL_JURY},
+    ProblemStateStage.FINAL_JURY: {ProblemStateStage.SUBMISSION, ProblemStateStage.PAPER},
+    ProblemStateStage.SUBMISSION: {ProblemStateStage.FINAL},
+    ProblemStateStage.FINAL: set(),
+}
+
+
+def validate_stage_transition(
+    current: ProblemStateStage, target: ProblemStateStage
+) -> None:
+    """Raise HTTPException if the transition is not allowed."""
+    allowed = VALID_STAGE_TRANSITIONS.get(current, set())
+    if target not in allowed:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Invalid stage transition: {current.value} -> {target.value}. "
+                f"Allowed next stages: {[s.value for s in allowed]}"
+            ),
+        )
+
+
 # ── Pydantic Schemas ─────────────────────────────────────────
 
 
@@ -46,17 +85,17 @@ class ConfigInfo(BaseModel):
 
 class ProblemStateCreate(BaseModel):
     project_id: Optional[str] = None
-    title: Optional[str] = None
-    competition: Optional[str] = None
+    title: Optional[str] = Field(None, max_length=500)
+    competition: Optional[str] = Field(None, max_length=255)
     deadline: Optional[datetime] = None
-    raw_problem: Optional[str] = None
+    raw_problem: Optional[str] = Field(None, max_length=100_000)
 
 
 class ProblemStateUpdate(BaseModel):
-    title: Optional[str] = None
-    competition: Optional[str] = None
+    title: Optional[str] = Field(None, max_length=500)
+    competition: Optional[str] = Field(None, max_length=255)
     deadline: Optional[datetime] = None
-    raw_problem: Optional[str] = None
+    raw_problem: Optional[str] = Field(None, max_length=100_000)
     current_stage: Optional[ProblemStateStage] = None
     status: Optional[ProblemStateStatus] = None
 
@@ -108,17 +147,14 @@ async def health_check():
 async def get_config():
     """Return current configuration (non-sensitive)."""
     settings = get_settings()
-    registry = get_provider_registry()
-    available = [
-        p.value for p in ProviderType
-        if p != ProviderType.MOCK
-    ]
     return ConfigInfo(
         app_name=settings.app_name,
         app_version=settings.app_version,
         default_provider=settings.default_provider.value,
         model_router_enabled=settings.model_router_enabled,
-        available_providers=available,
+        available_providers=[
+            p.value for p in ProviderType if p != ProviderType.MOCK
+        ],
     )
 
 
@@ -217,7 +253,11 @@ async def update_problem(
     data: ProblemStateUpdate,
     db: AsyncSession = Depends(get_db),
 ):
-    """Update a problem state."""
+    """Update a problem state.
+
+    Validates stage transitions: only forward transitions within the
+    defined state machine are allowed.
+    """
     result = await db.execute(
         select(ProblemState).where(ProblemState.id == problem_id)
     )
@@ -226,8 +266,29 @@ async def update_problem(
         raise HTTPException(status_code=404, detail="Problem not found")
 
     update_data = data.model_dump(exclude_unset=True)
+
+    # Validate stage transition if stage is being changed
+    if "current_stage" in update_data:
+        target_stage = update_data["current_stage"]
+        validate_stage_transition(problem.current_stage, target_stage)
+
+        # Record stage transition in history
+        history = list(problem.stage_history or [])
+        history.append({
+            "stage": problem.current_stage.value,
+            "status": problem.status.value,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        })
+        problem.stage_history = history
+
+    # Only update allowed fields (no mass assignment)
+    allowed_fields = {
+        "title", "competition", "deadline", "raw_problem",
+        "current_stage", "status",
+    }
     for key, value in update_data.items():
-        setattr(problem, key, value)
+        if key in allowed_fields:
+            setattr(problem, key, value)
 
     await db.flush()
     await db.refresh(problem)

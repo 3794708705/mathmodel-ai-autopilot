@@ -37,7 +37,7 @@
 - Test functions: `test_<behavior>`
 - Fixtures in `conftest.py`
 - Database tests use SQLite in-memory
-- Async tests use `pytest-asyncio`
+- Async tests use `asyncio.run()` wrapping (no pytest-asyncio dependency required)
 
 ## Common Commands
 

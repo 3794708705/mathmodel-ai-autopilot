@@ -24,7 +24,7 @@ Correctness > Traceability > Validation > Competition Value > Reliability > Main
 
 ## Current Development Phase
 
-**Phase 1 — Foundation** (in progress)
+**Phase 1 — Foundation** (completed)
 
 - FastAPI skeleton
 - PostgreSQL + SQLAlchemy

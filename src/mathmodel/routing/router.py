@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
-from mathmodel.config import ModelTier, ProviderType
+from mathmodel.config import ModelTier, ProviderType, get_settings
 from mathmodel.providers.base import (
     BaseModelProvider,
     GenerationRequest,
@@ -33,6 +33,7 @@ class ModelRouter:
     def __init__(self):
         self._policy = RoutingPolicy()
         self._registry = get_provider_registry()
+        self._settings = get_settings()
 
     def select_tier(self, profile: TaskProfile) -> ModelTier:
         """Select the appropriate model tier for a task profile."""
@@ -43,7 +44,17 @@ class ModelRouter:
     ) -> BaseModelProvider:
         """Get a provider instance appropriate for the given tier."""
         provider_type = preferred_provider or self._get_default_provider_for_tier(tier)
-        return self._registry.get_provider(provider_type)
+        provider = self._registry.get_provider(provider_type)
+
+        # Warn if the provider is a mock (real provider unavailable)
+        if provider.provider_name == "mock":
+            logger.warning(
+                "Provider %s fell back to MockProvider (API key missing or unavailable). "
+                "Responses will have is_mock=True.",
+                provider_type.value,
+            )
+
+        return provider
 
     async def route_generate(
         self,
@@ -75,7 +86,17 @@ class ModelRouter:
             **kwargs,
         )
 
-        return await provider.generate(request)
+        response = await provider.generate(request)
+
+        if response.is_mock:
+            logger.warning(
+                "Task type=%s received mock response from provider=%s. "
+                "Real LLM was not used.",
+                profile.task_type.value,
+                provider.provider_name,
+            )
+
+        return response
 
     async def route_structured_generate(
         self,
@@ -108,7 +129,10 @@ class ModelRouter:
 
     @staticmethod
     def _get_default_provider_for_tier(tier: ModelTier) -> ProviderType:
-        """Map model tier to default provider type."""
-        # In production, this would be more sophisticated
-        # For now, OpenAI is the default for all tiers
-        return ProviderType.OPENAI
+        """Map model tier to default provider type.
+
+        Phase 1: all tiers default to the configured default_provider.
+        Phase 2+: this will map tiers to specific providers/models.
+        """
+        settings = get_settings()
+        return settings.default_provider

@@ -58,16 +58,20 @@ class AgentResult:
 class BaseAgent(ABC):
     """Abstract base class for all agents.
 
-    Subclasses must define:
-    - name: unique agent identifier
-    - role: human-readable role description
-    - input_schema: Pydantic model for input validation
-    - output_schema: Pydantic model for output validation
-    - capabilities: list of capability strings
-    - run(): core agent logic
-    - validate_output(): self-validation of output
+    Subclasses must define these as class-level attributes:
+        name: str
+        role: str
+        input_schema: Type[BaseModel]
+        output_schema: Type[BaseModel]
+        capabilities: list[str]
+
+    And implement:
+        run(state) -> AgentResult
+        validate_output(output) -> list[AgentError]
     """
 
+    # These are declared here for type checking.
+    # Subclasses override them as simple class attributes.
     name: str
     role: str
     input_schema: Type[BaseModel]
@@ -76,36 +80,18 @@ class BaseAgent(ABC):
 
     def __init__(self):
         self._run_history: list[AgentResult] = []
+        self._validate_contract()
 
-    @property
-    @abstractmethod
-    def name(self) -> str:
-        """Unique agent identifier."""
-        ...
-
-    @property
-    @abstractmethod
-    def role(self) -> str:
-        """Human-readable role description."""
-        ...
-
-    @property
-    @abstractmethod
-    def input_schema(self) -> Type[BaseModel]:
-        """Pydantic model for input validation."""
-        ...
-
-    @property
-    @abstractmethod
-    def output_schema(self) -> Type[BaseModel]:
-        """Pydantic model for output validation."""
-        ...
-
-    @property
-    @abstractmethod
-    def capabilities(self) -> list[str]:
-        """List of capability strings for this agent."""
-        ...
+    def _validate_contract(self) -> None:
+        """Ensure all required attributes are set by the subclass."""
+        required = ["name", "role", "input_schema", "output_schema", "capabilities"]
+        for attr in required:
+            value = getattr(self, attr, None)
+            if value is None:
+                raise TypeError(
+                    f"{self.__class__.__name__} must define '{attr}' as a "
+                    f"class-level attribute. Got None."
+                )
 
     @abstractmethod
     async def run(self, state: ProblemState) -> AgentResult:

@@ -5,6 +5,7 @@ Central registry for model provider instances.
 
 from __future__ import annotations
 
+import logging
 from typing import Optional
 
 from mathmodel.config import ProviderType, get_settings
@@ -14,11 +15,15 @@ from mathmodel.providers.google import GoogleProvider
 from mathmodel.providers.mock import MockProvider
 from mathmodel.providers.openai import OpenAIProvider
 
+logger = logging.getLogger(__name__)
+
 
 class ProviderRegistry:
     """Registry of available model providers.
 
     Lazily instantiates providers on first access.
+    When a real provider is unavailable (no API key), falls back
+    to MockProvider with a distinctive fixed_response message.
     """
 
     def __init__(self):
@@ -36,15 +41,24 @@ class ProviderRegistry:
         return self._providers[provider_type]
 
     def _create_provider(self, provider_type: ProviderType) -> BaseModelProvider:
-        """Create a new provider instance."""
+        """Create a new provider instance.
+
+        Falls back to MockProvider when a real provider's API key
+        is not configured. Logs a warning so the fallback is never silent.
+        """
         settings = self._settings
 
         if provider_type == ProviderType.MOCK:
+            logger.info("Using MockProvider (explicitly configured)")
             return MockProvider(default_model="mock-model")
 
         if provider_type == ProviderType.OPENAI:
             api_key = settings.get_api_key(ProviderType.OPENAI)
             if not api_key:
+                logger.warning(
+                    "OPENAI_API_KEY not configured. Falling back to MockProvider. "
+                    "All OpenAI requests will return is_mock=True."
+                )
                 return MockProvider(
                     default_model=settings.openai_default_model,
                     fixed_response="[MOCK] OpenAI API key not configured.",
@@ -57,6 +71,10 @@ class ProviderRegistry:
         if provider_type == ProviderType.GOOGLE:
             api_key = settings.get_api_key(ProviderType.GOOGLE)
             if not api_key:
+                logger.warning(
+                    "GOOGLE_API_KEY not configured. Falling back to MockProvider. "
+                    "All Google requests will return is_mock=True."
+                )
                 return MockProvider(
                     default_model=settings.google_default_model,
                     fixed_response="[MOCK] Google API key not configured.",
@@ -69,6 +87,10 @@ class ProviderRegistry:
         if provider_type == ProviderType.ANTHROPIC:
             api_key = settings.get_api_key(ProviderType.ANTHROPIC)
             if not api_key:
+                logger.warning(
+                    "ANTHROPIC_API_KEY not configured. Falling back to MockProvider. "
+                    "All Anthropic requests will return is_mock=True."
+                )
                 return MockProvider(
                     default_model=settings.anthropic_default_model,
                     fixed_response="[MOCK] Anthropic API key not configured.",

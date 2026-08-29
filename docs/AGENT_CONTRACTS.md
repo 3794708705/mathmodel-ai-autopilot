@@ -13,7 +13,7 @@ class BaseAgent:
     capabilities: list[str]
 
     async def run(self, state: ProblemState) -> AgentResult
-    def validate_output(self, output: BaseModel) -> ValidationResult
+    def validate_output(self, output: BaseModel) -> list[AgentError]
     async def retry(self, state: ProblemState, error: AgentError) -> AgentResult
 ```
 

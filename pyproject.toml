@@ -35,6 +35,9 @@ dev = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+markers = [
+    "asyncio: async test marker",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]
