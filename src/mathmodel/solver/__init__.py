@@ -88,7 +88,7 @@ class SciPySolverAdapter(BaseSolverAdapter):
             return False
 
     def solve(self, model: MathematicalModel, **kwargs) -> SolverResult:
-        """Solve an LP model using SciPy linprog."""
+        """Solve an LP model using SciPy linprog via the compiler."""
         if not self.available:
             return SolverResult(
                 model_id=model.model_id,
@@ -97,52 +97,12 @@ class SciPySolverAdapter(BaseSolverAdapter):
                 warnings=["SciPy not available"],
             )
 
-        try:
-            from scipy.optimize import linprog
-            import numpy as np
+        # Compile the model to LP form
+        compiled = SimpleLPCompiler.compile(model)
+        compiled["model_id"] = model.model_id
 
-            # Build from variables and constraints
-            var_names = [v.symbol for v in model.variables]
-            n = len(var_names)
-
-            if n == 0:
-                return SolverResult(model_id=model.model_id, solver="scipy", status=SolverStatus.ERROR, warnings=["No variables"])
-
-            # Build objective
-            c = np.zeros(n)
-            for obj in model.objectives:
-                # Simple: assume expression is "c1*x1 + c2*x2 + ..."
-                pass  # In real implementation, parse expression
-
-            # For now, use a simple LP: min c^T x
-            # Build constraints
-            A_ub = []
-            b_ub = []
-            bounds = [(None, None)] * n
-
-            for con in model.constraints:
-                # Parse constraint expression
-                pass
-
-            # For the E2E test, we'll use a manually constructed simple LP
-            # This is a simplified placeholder — full expression parsing is the
-            # ModelCompiler's job
-
-            return SolverResult(
-                model_id=model.model_id,
-                solver="scipy",
-                status=SolverStatus.OPTIMAL,
-                execution_real=True,
-                production_safe=False,
-            )
-
-        except Exception as e:
-            return SolverResult(
-                model_id=model.model_id,
-                solver="scipy",
-                status=SolverStatus.ERROR,
-                warnings=[str(e)],
-            )
+        # Delegate to the real solver function
+        return solve_lp_scipy(compiled)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -309,23 +269,35 @@ def evaluate_constraints(
     model: MathematicalModel,
     result: SolverResult,
 ) -> dict[str, Any]:
-    """Re-evaluate all constraints against solver results."""
+    """Re-evaluate all constraints against solver results.
+
+    Uses compiled coefficients — never eval() on raw expressions.
+    """
     violations = []
     var_vals = result.variable_values
 
-    for con in model.constraints:
-        # Simple evaluation: substitute variable values into expression
-        # For now, use the compiled form
+    # Compile the model to get coefficient matrices
+    compiled = SimpleLPCompiler.compile(model)
+
+    for i, con in enumerate(model.constraints):
         try:
-            # Build evaluation context
-            safe_dict = {name: var_vals.get(name, 0.0) for name in var_vals}
-            safe_dict.update({
-                "abs": abs, "min": min, "max": max, "sqrt": __import__("math").sqrt,
-            })
+            # Get the constraint row from the compiled matrices
+            # For LE constraints: row is in A_ub, b_ub
+            # For GE constraints: row is negated in A_ub, b_ub
+            # For EQ constraints: row is in A_eq, b_eq
+            coeffs = SimpleLPCompiler._parse_coefficients(
+                con.expression,
+                {v.symbol: j for j, v in enumerate(model.variables)},
+                len(model.variables),
+            )
 
-            lhs = eval(con.expression, {"__builtins__": {}}, safe_dict)
+            # Compute lhs = sum(coeff_i * var_i)
+            lhs = sum(
+                coeffs[j] * var_vals.get(model.variables[j].symbol, 0.0)
+                for j in range(len(model.variables))
+            )
+
             violation = 0.0
-
             if con.relation == ConstraintRelation.LE:
                 violation = max(0.0, lhs - con.rhs)
             elif con.relation == ConstraintRelation.GE:
@@ -338,9 +310,9 @@ def evaluate_constraints(
             violations.append({
                 "constraint_id": con.constraint_id,
                 "name": con.name,
-                "lhs": lhs,
+                "lhs": round(lhs, 6),
                 "rhs": con.rhs,
-                "violation": violation,
+                "violation": round(violation, 10),
                 "within_tolerance": within,
             })
         except Exception as e:
