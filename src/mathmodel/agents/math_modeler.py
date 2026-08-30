@@ -61,27 +61,43 @@ class MathModeler(BaseAgent):
                 return self._finish_result(result, AgentStatus.FAILED,
                     errors=[AgentError(message="No ProblemAnalysis found", error_type="prerequisite")])
 
-            # Get selected model info
             selected = state.selected_model or {}
             candidate_id = selected.get("candidate_id", "unknown")
 
             prompt = self._build_prompt(analysis, state)
             profile = TaskProfile.for_task_type(TaskType.MATHEMATICAL_MODELING)
 
-            output = await self._router.route_structured_generate(
-                profile=profile,
-                prompt=prompt,
-                output_schema=MathematicalModel,
-                system_prompt=self._system_prompt(),
-            )
+            # Attempt with corrective feedback
+            max_attempts = 3
+            previous_errors = None
+            for attempt in range(1, max_attempts + 1):
+                attempt_prompt = prompt
+                if previous_errors:
+                    attempt_prompt = self._corrective_prompt(prompt, previous_errors)
 
-            if not isinstance(output, MathematicalModel):
-                return self._finish_result(result, AgentStatus.FAILED,
-                    errors=[AgentError(message=f"Expected MathematicalModel, got {type(output).__name__}", error_type="schema")])
+                output = await self._router.route_structured_generate(
+                    profile=profile,
+                    prompt=attempt_prompt,
+                    output_schema=MathematicalModel,
+                    system_prompt=self._system_prompt(),
+                )
 
-            # Domain validation
-            issues = output.validate_domain()
-            if issues:
+                if not isinstance(output, MathematicalModel):
+                    if attempt < max_attempts:
+                        previous_errors = [f"Schema validation: expected MathematicalModel, got {type(output).__name__}"]
+                        continue
+                    return self._finish_result(result, AgentStatus.FAILED,
+                        errors=[AgentError(message=f"Expected MathematicalModel, got {type(output).__name__}", error_type="schema")])
+
+                issues = output.validate_domain()
+                if not issues:
+                    break  # success
+
+                if attempt < max_attempts:
+                    previous_errors = issues
+                else:
+                    return self._finish_result(result, AgentStatus.FAILED,
+                        errors=[AgentError(message=f"Domain validation: {'; '.join(issues)}", error_type="validation")])
                 return self._finish_result(result, AgentStatus.FAILED,
                     errors=[AgentError(message=f"Domain validation: {'; '.join(issues)}", error_type="validation")])
 
@@ -144,3 +160,20 @@ class MathModeler(BaseAgent):
 
     def _system_prompt(self) -> str:
         return "You are an expert mathematical modeler. You formalize problems into precise mathematical models with well-defined variables, parameters, objectives, and constraints. You never fabricate data."
+
+    @staticmethod
+    def _corrective_prompt(base_prompt: str, previous_errors: list[str]) -> str:
+        """Add corrective feedback to the prompt for retry."""
+        error_text = "\n".join(f"  - {e}" for e in previous_errors)
+        return (
+            f"{base_prompt}\n\n"
+            f"## CORRECTIVE FEEDBACK\n"
+            f"The previous attempt had the following errors:\n"
+            f"{error_text}\n\n"
+            f"Please fix these specific errors in your new model. "
+            f"Ensure all parameter IDs referenced in equations are "
+            f"defined in the parameters list. Ensure all variable IDs "
+            f"referenced in constraints are defined in the variables list. "
+            f"Use numeric coefficients directly in expressions when the "
+            f"problem provides the values explicitly."
+        )
