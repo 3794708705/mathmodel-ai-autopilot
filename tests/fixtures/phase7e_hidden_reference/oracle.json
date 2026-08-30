@@ -1,0 +1,16 @@
+{
+  "status": 0,
+  "objective": 6150.0,
+  "max_violation": 0.0,
+  "feasible": true,
+  "service_levels": {
+    "S1": 1.0,
+    "S2": 1.0,
+    "S3": 1.0,
+    "S4": 1.0,
+    "S5": 1.0
+  },
+  "fairness_min": 1.0,
+  "fairness_max": 1.0,
+  "transport_cost": 6150.0
+}

@@ -1,0 +1,6 @@
+shelter_id,demand_units,priority
+S1,200,high
+S2,150,high
+S3,180,medium
+S4,250,medium
+S5,120,low

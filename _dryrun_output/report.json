@@ -1,0 +1,85 @@
+{
+  "gate": "reality_failed",
+  "elapsed": 255.25225687026978,
+  "trace": {
+    "real_llm_calls": 0,
+    "mock_llm_calls": 0,
+    "real_search_queries": 1,
+    "fixture_records_used": 0,
+    "real_solver_runs": 0,
+    "mock_executions": 0,
+    "semantic_verifications": 0,
+    "fallbacks": [],
+    "failures": []
+  },
+  "results": {
+    "problem_agent": {
+      "status": "FAIL",
+      "detail": "failed"
+    },
+    "data_agent": {
+      "status": "PASS",
+      "detail": "supply=3 depots, demand=5 shelters, cost=15 routes"
+    },
+    "literature": {
+      "status": "PASS",
+      "detail": "records=2 first_doi=10.21203/rs.3.rs-1140300/v1"
+    },
+    "model_explorer": {
+      "status": "SKIP",
+      "detail": "no problem analysis"
+    },
+    "model_jury": {
+      "status": "SKIP",
+      "detail": "no candidates"
+    },
+    "math_modeler": {
+      "status": "SKIP",
+      "detail": "no selected model"
+    },
+    "solver": {
+      "status": "PASS",
+      "detail": "obj=6150.0 oracle=6150.0 diff=0.0000"
+    },
+    "freeze_enforcement": {
+      "status": "PASS",
+      "detail": "MODEL_EXPLORE in FREEZE \u2192 block"
+    },
+    "submission_enforcement": {
+      "status": "PASS",
+      "detail": "CODE_MAJOR_REWRITE in SUBMISSION \u2192 block"
+    },
+    "redteam": {
+      "status": "SKIP",
+      "detail": "no model/solver"
+    },
+    "paper_ir": {
+      "status": "PASS",
+      "detail": "sections=5"
+    },
+    "pdf": {
+      "status": "BLOCKED_BY_ENVIRONMENT",
+      "detail": "Command '['docker', 'run', '--rm', '-v', 'D:\\\\deepseek\u5de5\u4f5c\u533a/_dryrun_output:/work', '-w', '/work', 'tex"
+    },
+    "submission_check": {
+      "status": "ERROR",
+      "detail": "SubmissionCheckAgent.__init__() missing 1 required positional argument: 'profile'"
+    }
+  },
+  "oracle": {
+    "status": 0,
+    "objective": 6150.0,
+    "max_violation": 0.0,
+    "feasible": true,
+    "service_levels": {
+      "S1": 1.0,
+      "S2": 1.0,
+      "S3": 1.0,
+      "S4": 1.0,
+      "S5": 1.0
+    },
+    "fairness_min": 1.0,
+    "fairness_max": 1.0,
+    "transport_cost": 6150.0
+  }
+}

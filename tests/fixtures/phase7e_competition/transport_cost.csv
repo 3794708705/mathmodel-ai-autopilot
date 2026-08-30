@@ -1,0 +1,16 @@
+from_depot,to_shelter,cost_per_unit
+D1,S1,8
+D1,S2,12
+D1,S3,6
+D1,S4,15
+D1,S5,10
+D2,S1,10
+D2,S2,5
+D2,S3,14
+D2,S4,8
+D2,S5,12
+D3,S1,14
+D3,S2,9
+D3,S3,7
+D3,S4,11
+D3,S5,6

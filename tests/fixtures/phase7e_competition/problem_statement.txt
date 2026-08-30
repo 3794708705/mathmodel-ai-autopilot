@@ -1,0 +1,53 @@
+# EMERGENCY RESOURCE ALLOCATION CHALLENGE
+
+## Background
+
+River City has been hit by a severe storm, causing widespread flooding and
+power outages. The city's Emergency Management Office must coordinate
+the distribution of emergency supplies from three supply depots to five
+affected shelters.
+
+## Objective
+
+Determine the optimal allocation of emergency supply kits to minimize
+the total transportation cost while ensuring:
+1. All shelter demand is met to the maximum extent possible
+2. Fairness across shelters (no shelter should receive less than 60% of
+   its demand if supply is constrained)
+3. Total budget does not exceed $50,000
+4. Transport capacity constraints are respected
+
+## Data
+
+See attached files:
+- supply.csv: Supply depot capacities and handling costs
+- demand.csv: Shelter demand and priority levels
+- transport_cost.csv: Per-unit transport costs from each depot to each shelter
+
+## Assumptions and Clarifications
+
+The following must be clarified by your team:
+- Each shelter has a minimum service level of 60% of demand
+- The fairness constraint means that the ratio of fulfilled demand to total
+  demand should be as equal as possible across shelters
+- Transportation cost is linear per unit
+- Supply kits are homogeneous (one type)
+- The budget covers only transportation costs (handling costs are separate)
+
+## Requirements
+
+1. Formulate a mathematical model (linear programming or similar)
+2. Solve the model to determine optimal allocations
+3. Perform sensitivity analysis on at least two key parameters
+4. Discuss robustness under demand uncertainty
+5. Provide actionable recommendations
+
+## Submission
+
+Prepare a paper of at most 8 pages including:
+- Problem restatement and assumptions
+- Model formulation
+- Solution and results
+- Sensitivity and robustness analysis
+- Discussion and recommendations
+- References

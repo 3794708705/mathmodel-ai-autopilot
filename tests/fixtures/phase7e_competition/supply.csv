@@ -1,0 +1,4 @@
+depot_id,capacity_units,handling_cost_per_unit
+D1,500,2.5
+D2,400,2.0
+D3,350,3.0
