@@ -39,6 +39,8 @@ class RoutingDecision:
     task_type: str = ""
     criticality: TaskCriticality = TaskCriticality.MEDIUM
     runtime_mode: RuntimeMode = RuntimeMode.STANDARD
+    runtime_decision_id: str = ""  # Bound to RuntimeDecision
+    authorization_result: str = ""  # "ALLOW" / "HUMAN_REVIEW" / "BLOCK"
     capability_tier: ModelTier = ModelTier.BALANCED
     provider_type: ProviderType = ProviderType.MOCK
     model_slug: str = ""

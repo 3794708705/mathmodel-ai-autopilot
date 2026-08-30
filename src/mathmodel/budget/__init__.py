@@ -186,10 +186,63 @@ class BudgetLedger:
             self._reservations[reservation.reservation_id] = reservation
             return reservation
 
-    def consume(self, reservation_id: str, actual_amount: int) -> BudgetLedgerEntry:
-        """Consume a reservation (call was made)."""
+    def reserve_multi(
+        self,
+        resources: dict[ResourceType, int],
+        owner_run_id: str,
+        is_critical: bool = False,
+    ) -> Optional[list[BudgetReservation]]:
+        """Atomic multi-resource reservation. All or nothing."""
         with self._lock:
+            # Check all available first
+            for rt, amount in resources.items():
+                available = self._budget.available_for(rt, is_critical)
+                if available is not None and available < amount:
+                    return None
+
+            # Allocate all
+            reservations = []
+            for rt, amount in resources.items():
+                remaining = self._budget.remaining(rt)
+                if remaining is not None:
+                    self._decrement(rt, amount)
+                res = BudgetReservation(
+                    budget_id=self._budget.competition_budget_id,
+                    resource_type=rt,
+                    amount=amount,
+                    owner_run_id=owner_run_id,
+                )
+                self._reservations[res.reservation_id] = res
+                reservations.append(res)
+            return reservations
+
+    def consume(self, reservation_id: str, actual_amount: int) -> BudgetLedgerEntry:
+        """Consume a reservation (call was made). actual_amount=0 means UNKNOWN."""
+        with self._lock:
+            # If actual_amount is 0, treat as UNKNOWN — consume full reserved
+            if actual_amount == 0:
+                res = self._reservations.get(reservation_id)
+                if res:
+                    actual_amount = res.amount  # conservative: consume all
             return self._reconcile(reservation_id, actual_amount, "consumed")
+
+    def refill(
+        self, resource_type: ResourceType, amount: int, actor: str, reason: str,
+    ) -> BudgetLedgerEntry:
+        """Authorized budget refill. Records audit trail."""
+        with self._lock:
+            self._increment(resource_type, amount)
+            # Create a dummy reservation for ledger entry
+            res = BudgetReservation(
+                budget_id=self._budget.competition_budget_id,
+                resource_type=resource_type,
+                amount=amount,
+                owner_run_id=actor,
+            )
+            self._reservations[res.reservation_id] = res
+            entry = self._add_entry(res, 0, 0, f"refill by {actor}: {reason}")
+            res.status = ReservationStatus.RELEASED
+            return entry
 
     def release(self, reservation_id: str) -> None:
         """Release a reservation (call was not made)."""

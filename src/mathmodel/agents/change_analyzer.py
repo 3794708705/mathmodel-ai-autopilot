@@ -24,10 +24,13 @@ class ChangeImpactResult:
     candidate_changed: bool = False
     family_changed: bool = False
     objectives_changed: bool = False
+    objective_direction_changed: bool = False
     constraints_changed: bool = False
     variables_changed: bool = False
+    variable_domain_changed: bool = False
     parameters_changed: bool = False
     units_changed: bool = False
+    single_critical_constraint_removed: bool = False
 
 
 class ChangeImpactAnalyzer:
@@ -67,6 +70,10 @@ class ChangeImpactAnalyzer:
             result.affected_ids.extend(
                 [f"obj:{o}" for o in (before_obj ^ after_obj)]
             )
+        # Objective direction check
+        result.objective_direction_changed = self._direction_changed(
+            before.get("objectives", []), after.get("objectives", [])
+        )
 
         # Constraints
         before_con = set(before.get("constraint_ids", []))
@@ -85,6 +92,10 @@ class ChangeImpactAnalyzer:
             result.affected_ids.extend(
                 [f"var:{v}" for v in (before_var ^ after_var)]
             )
+        # Variable domain change
+        result.variable_domain_changed = self._domain_changed(
+            before.get("variables", []), after.get("variables", [])
+        )
 
         # Parameters
         before_params = self._extract_param_ids(before.get("parameters", []))
@@ -132,9 +143,14 @@ class ChangeImpactAnalyzer:
     def _classify(self, result: ChangeImpactResult) -> ChangeClassification:
         if result.candidate_changed or result.family_changed:
             return ChangeClassification.MODEL_SWITCH
-        if result.objectives_changed:
+        if result.objectives_changed or result.objective_direction_changed:
+            return ChangeClassification.MAJOR_MODEL_CHANGE
+        if result.variable_domain_changed:
             return ChangeClassification.MAJOR_MODEL_CHANGE
         if result.constraints_changed:
+            # Single critical constraint = MAJOR (not just CONSTRAINT_FIX)
+            if result.single_critical_constraint_removed:
+                return ChangeClassification.MAJOR_MODEL_CHANGE
             obj_count = len(result.affected_ids)
             if obj_count > 3:
                 return ChangeClassification.MAJOR_MODEL_CHANGE
@@ -146,6 +162,46 @@ class ChangeImpactAnalyzer:
         if result.units_changed:
             return ChangeClassification.PARAMETER_CORRECTION
         return ChangeClassification.FORMATTING_ONLY
+
+    @staticmethod
+    def _direction_changed(
+        before: list[dict], after: list[dict],
+    ) -> bool:
+        """Detect if an objective direction changed (MAX→MIN or vice versa)."""
+        before_senses = {
+            o.get("objective_id", ""): o.get("sense", o.get("direction", ""))
+            for o in before if isinstance(o, dict)
+        }
+        after_senses = {
+            o.get("objective_id", ""): o.get("sense", o.get("direction", ""))
+            for o in after if isinstance(o, dict)
+        }
+        for oid, bs in before_senses.items():
+            if oid in after_senses:
+                if bs != after_senses[oid] and bs in ("maximize", "minimize", "MAX", "MIN"):
+                    return True
+        return False
+
+    @staticmethod
+    def _domain_changed(
+        before: list[dict], after: list[dict],
+    ) -> bool:
+        """Detect variable domain changes (continuous→binary/integer)."""
+        order = {"continuous": 0, "integer": 1, "binary": 2}
+        before_domains = {
+            v.get("variable_id", ""): str(v.get("variable_type", v.get("domain", ""))).lower()
+            for v in before if isinstance(v, dict)
+        }
+        after_domains = {
+            v.get("variable_id", ""): str(v.get("variable_type", v.get("domain", ""))).lower()
+            for v in after if isinstance(v, dict)
+        }
+        for vid, bd in before_domains.items():
+            if vid in after_domains:
+                ad = after_domains[vid]
+                if bd != ad:
+                    return True
+        return False
 
     @staticmethod
     def _max_risk(a: ChangeClassification, b: ChangeClassification) -> ChangeClassification:
