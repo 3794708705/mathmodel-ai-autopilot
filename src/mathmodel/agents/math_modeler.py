@@ -128,11 +128,17 @@ class MathModeler(BaseAgent):
             "- solver_requirements: what solver capabilities are needed",
             "",
             "CRITICAL RULES:",
-            "- Do NOT fabricate parameter values — mark as REQUIRED if unknown",
+            "- Do NOT fabricate parameter values — mark as REQUIRED only when the "
+            "problem truly does not provide the value",
+            "- IMPORTANT: if the problem statement EXPLICITLY gives a numeric value "
+            "(e.g. profit $3, capacity 100), that parameter MUST have that value "
+            "and status 'known' — do not mark explicitly-given values as REQUIRED",
             "- Every symbol must be unique across variables and parameters",
             "- Every equation must reference valid variable_ids and parameter_ids",
             "- Every constraint must have a source (problem statement, data, or assumption)",
             "- Use accepted assumptions only",
+            "- Prefer numeric coefficients in expressions (e.g. '3*x1' not 'p_c*x1') "
+            "when the parameter value is known",
         ]
         return "\n".join(parts)
 

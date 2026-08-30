@@ -133,6 +133,13 @@ class ModelRouter:
             explanation.primary_reasons,
         )
 
+        # Model selection by tier: reasoning-heavy tasks get the stronger
+        # model when the provider supports multiple models. Slug comes
+        # from configuration, never hardcoded per task.
+        model_override = self._select_model_for_tier(provider, tier)
+        if model_override and "model" not in kwargs:
+            kwargs["model"] = model_override
+
         request = StructuredGenerationRequest(
             prompt=prompt,
             output_schema=output_schema,
@@ -141,6 +148,20 @@ class ModelRouter:
         )
 
         return await provider.structured_generate(request)
+
+    def _select_model_for_tier(
+        self, provider: BaseModelProvider, tier: ModelTier
+    ) -> Optional[str]:
+        """Choose a configured model slug for the tier, if applicable."""
+        settings = get_settings()
+        high_tiers = (
+            ModelTier.FLAGSHIP_HIGH,
+            ModelTier.FLAGSHIP_XHIGH,
+            ModelTier.FLAGSHIP_MAX,
+        )
+        if tier in high_tiers and provider.provider_name == "deepseek":
+            return settings.deepseek_reasoning_model
+        return None
 
     @staticmethod
     def _get_default_provider_for_tier(tier: ModelTier) -> ProviderType:

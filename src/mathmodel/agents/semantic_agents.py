@@ -29,6 +29,25 @@ logger = logging.getLogger(__name__)
 # Semantic RedTeam
 # ═══════════════════════════════════════════════════════════════
 
+class SemanticIssueOut(BaseModel):
+    """Structured semantic issue from the LLM."""
+    severity: str = "MAJOR"  # CRITICAL | MAJOR | MINOR
+    category: str = ""
+    title: str = ""
+    description: str = ""
+    evidence: list[dict] = Field(default_factory=list)
+    impact: str = ""
+    suggested_fix: str = ""
+    target_component: str = ""
+    confidence: float = Field(default=0.5, ge=0.0, le=1.0)
+
+
+class SemanticReviewOutput(BaseModel):
+    """Structured output of semantic red team review."""
+    issues: list[SemanticIssueOut] = Field(default_factory=list)
+    summary: str = ""
+
+
 class SemanticRedTeamAgent:
     """Real LLM-powered semantic attack on the model.
 
@@ -51,11 +70,12 @@ class SemanticRedTeamAgent:
         sensitivity: Optional[SensitivityReport] = None,
         robustness: Optional[RobustnessReport] = None,
         evidence: Optional[EvidenceStore] = None,
+        problem_context: Optional[str] = None,
     ) -> RedTeamReport:
         """Execute semantic review using real LLM.
 
-        If no router/LLM is available, returns an empty report
-        with a clear note that semantic review was not performed.
+        problem_context: additional requirements from the problem
+        statement that the model must satisfy (e.g., fairness).
         """
         if self._router is None:
             return RedTeamReport(
@@ -65,20 +85,109 @@ class SemanticRedTeamAgent:
                         "not performed. Deterministic checks only.",
             )
 
-        prompt = self._build_prompt(model, result, validation, sensitivity, robustness)
-        # Structured generation would go here with real LLM
-        # For now, return contract-level report
-        return RedTeamReport(
-            model_id=model.model_id,
-            issues=[],
-            summary="SemanticRedTeam: provider configured but not yet invoked in "
-                    "this environment. Architecture: IMPLEMENTED, Reality: NOT VERIFIED.",
+        prompt = self._build_prompt(
+            model, result, validation, sensitivity, robustness,
+            problem_context=problem_context,
         )
+
+        # Structured generation with real LLM
+        from mathmodel.routing.profile import TaskProfile, TaskType
+
+        try:
+            profile = TaskProfile.for_task_type(TaskType.RED_TEAM)
+            output = await self._router.route_structured_generate(
+                profile=profile,
+                prompt=prompt,
+                output_schema=SemanticReviewOutput,
+                system_prompt=(
+                    "You are an adversarial mathematical modeling competition "
+                    "reviewer. Attack the model honestly; do not fabricate issues."
+                ),
+            )
+
+            if isinstance(output, SemanticReviewOutput):
+                # Validate issue references
+                valid_issues = []
+                var_ids = {v.variable_id for v in model.variables}
+                con_ids = {c.constraint_id for c in model.constraints}
+                obj_ids = {o.objective_id for o in model.objectives}
+                for issue in output.issues:
+                    refs = issue.evidence
+                    valid_refs = [r for r in refs if self._reference_valid(r, var_ids, con_ids, obj_ids)]
+                    issue.evidence = valid_refs
+                    if issue.severity in (IssueSeverity.CRITICAL.value, IssueSeverity.MAJOR.value, IssueSeverity.MINOR.value):
+                        valid_issues.append(issue)
+
+                # If the LLM identified flaws in the summary but did not
+                # populate the structured issues list, do not lose the signal.
+                if not valid_issues and output.summary:
+                    summary_lower = output.summary.lower()
+                    negative_markers = (
+                        "flaw", "missing", "omits", "does not", "fails to",
+                        "invalid", "incorrect", "must be revised", "critically",
+                    )
+                    if any(m in summary_lower for m in negative_markers):
+                        valid_issues.append(SemanticIssueOut(
+                            severity=IssueSeverity.MAJOR.value,
+                            category="semantic",
+                            title="Semantic issue identified in summary",
+                            description=output.summary[:500],
+                            evidence=[],
+                            impact="Model may not satisfy problem requirements",
+                            suggested_fix="Revise model per the identified issue",
+                            target_component="model",
+                            confidence=0.7,
+                        ))
+
+                return RedTeamReport(
+                    model_id=model.model_id,
+                    issues=[RedTeamIssue(
+                        severity=IssueSeverity(i.severity),
+                        category=i.category,
+                        title=i.title,
+                        description=i.description,
+                        evidence=i.evidence,
+                        impact=i.impact,
+                        suggested_fix=i.suggested_fix,
+                        target_component=i.target_component,
+                        confidence=i.confidence,
+                    ) for i in valid_issues],
+                    summary=output.summary,
+                )
+            else:
+                return RedTeamReport(
+                    model_id=model.model_id,
+                    issues=[],
+                    summary=f"SemanticRedTeam: unexpected output type {type(output).__name__}",
+                )
+        except Exception as e:
+            return RedTeamReport(
+                model_id=model.model_id,
+                issues=[],
+                summary=f"SemanticRedTeam LLM call failed: {str(e)[:200]}",
+            )
+
+    @staticmethod
+    def _reference_valid(ref, var_ids, con_ids, obj_ids) -> bool:
+        """Check that an evidence reference points to an existing artifact."""
+        if not isinstance(ref, dict):
+            return True  # free-form evidence allowed
+        for key in ("variable_id", "constraint_id", "objective_id", "equation_id"):
+            if key in ref:
+                value = ref[key]
+                if key == "variable_id" and value not in var_ids:
+                    return False
+                if key == "constraint_id" and value not in con_ids:
+                    return False
+                if key == "objective_id" and value not in obj_ids:
+                    return False
+        return True
 
     def _build_prompt(
         self, model, result, validation, sensitivity=None, robustness=None,
+        problem_context: Optional[str] = None,
     ) -> str:
-        return "\n".join([
+        lines = [
             "You are an adversarial reviewer for a mathematical modeling competition.",
             "Attack the model from these angles:",
             "- Problem interpretation: does the model solve the right problem?",
@@ -90,10 +199,39 @@ class SemanticRedTeamAgent:
             "- Unsupported conclusions: any claims that go beyond the evidence?",
             "- Competition relevance: is this approach feasible in competition time?",
             "",
-            "For each issue, provide: severity (CRITICAL/MAJOR/MINOR), category, title, description, evidence, suggested_fix.",
-            "Reference specific equation IDs, constraint IDs, variable IDs, or evidence IDs.",
-            "If the model is genuinely sound, say so — do NOT fabricate issues.",
-        ])
+        ]
+        if problem_context:
+            lines.append("## PROBLEM REQUIREMENTS (from problem statement)")
+            lines.append(problem_context)
+            lines.append("")
+        lines.append("## MODEL STRUCTURE")
+        lines.append(f"Model: {model.name} (id={model.model_id})")
+        lines.append("Variables:")
+        for v in model.variables:
+            lines.append(f"  - {v.variable_id} {v.symbol}: {v.name or v.meaning}")
+        lines.append("Objectives:")
+        for o in model.objectives:
+            lines.append(f"  - {o.objective_id}: {o.expression} ({o.sense.value})")
+        lines.append("Constraints:")
+        for c in model.constraints:
+            lines.append(f"  - {c.constraint_id}: {c.expression} {c.relation.value} {c.rhs}")
+        if result is not None:
+            lines.append(f"Solver status: {getattr(result, 'status', 'unknown')}")
+            lines.append(f"Objective value: {getattr(result, 'objective_value', None)}")
+        lines.append("")
+        lines.append(
+            "For each issue, provide: severity (CRITICAL/MAJOR/MINOR), category, "
+            "title, description, evidence (reference existing constraint_id/"
+            "variable_id/objective_id where applicable), impact, suggested_fix, "
+            "target_component, confidence."
+        )
+        lines.append(
+            "IMPORTANT: If the problem requires goals the model does not cover "
+            "(e.g. fairness when only profit is optimized), flag it as an "
+            "objective mismatch / missing constraint issue."
+        )
+        lines.append("If the model is genuinely sound, return an empty issues list — do NOT fabricate issues.")
+        return "\n".join(lines)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -118,6 +256,14 @@ class ClaimSupportResult(BaseModel):
     confidence: float = Field(default=0.5, ge=0.0, le=1.0)
     provider: str = ""
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class ClaimSupportOutput(BaseModel):
+    """Structured claim-support judgment from the LLM."""
+    support_status: str = "INSUFFICIENT_EVIDENCE"
+    reason: str = ""
+    evidence_reference: str = ""
+    confidence: float = Field(default=0.5, ge=0.0, le=1.0)
 
 
 class ClaimSupportVerifier:
@@ -152,17 +298,61 @@ class ClaimSupportVerifier:
                 provider="none",
             )
 
-        # Build prompt with actual retrieved evidence
+        # Deterministic enforcement: no retrieved evidence → INSUFFICIENT
+        evidence_text = (record.abstract or "").strip()
+        if not evidence_text:
+            return ClaimSupportResult(
+                claim_id=claim.claim_id,
+                literature_id=record.literature_id,
+                support_status=ClaimSupportStatus.INSUFFICIENT_EVIDENCE,
+                reason="No retrieved abstract/evidence available — cannot verify claim support.",
+                provider="deepseek",
+            )
+
+        # Build prompt with actual retrieved evidence and call the real LLM
+        from mathmodel.routing.profile import TaskProfile, TaskType
+
         prompt = self._build_prompt(claim, record)
-        # Structured generation would go here with real LLM
-        return ClaimSupportResult(
-            claim_id=claim.claim_id,
-            literature_id=record.literature_id,
-            support_status=ClaimSupportStatus.INSUFFICIENT_EVIDENCE,
-            reason="Architecture: IMPLEMENTED. Reality: NOT VERIFIED (no real LLM call executed).",
-            provider="deepseek",
-            confidence=0.5,
-        )
+        try:
+            profile = TaskProfile.for_task_type(TaskType.CITATION_VERIFICATION)
+            output = await self._router.route_structured_generate(
+                profile=profile,
+                prompt=prompt,
+                output_schema=ClaimSupportOutput,
+                system_prompt=(
+                    "You judge whether a literature record's retrieved abstract "
+                    "supports a claim. Base your judgment ONLY on the provided "
+                    "abstract/metadata, never on training-data memory."
+                ),
+            )
+            if isinstance(output, ClaimSupportOutput):
+                status = output.support_status
+                if status not in (v.value for v in ClaimSupportStatus):
+                    status = ClaimSupportStatus.INSUFFICIENT_EVIDENCE
+                return ClaimSupportResult(
+                    claim_id=claim.claim_id,
+                    literature_id=record.literature_id,
+                    support_status=status,
+                    reason=output.reason,
+                    evidence_reference=output.evidence_reference,
+                    confidence=output.confidence,
+                    provider="deepseek",
+                )
+            return ClaimSupportResult(
+                claim_id=claim.claim_id,
+                literature_id=record.literature_id,
+                support_status=ClaimSupportStatus.INSUFFICIENT_EVIDENCE,
+                reason=f"Unexpected LLM output type: {type(output).__name__}",
+                provider="deepseek",
+            )
+        except Exception as e:
+            return ClaimSupportResult(
+                claim_id=claim.claim_id,
+                literature_id=record.literature_id,
+                support_status=ClaimSupportStatus.INSUFFICIENT_EVIDENCE,
+                reason=f"LLM verification failed: {str(e)[:200]}",
+                provider="deepseek",
+            )
 
     def _build_prompt(self, claim: Claim, record: LiteratureRecord) -> str:
         return "\n".join([
@@ -236,6 +426,28 @@ class SemanticPaperReviewer:
             *sections_text[:20],
             "",
             "If the paper is clean, say so. Do NOT fabricate issues.",
+            "Respond with a JSON object: {issues: [string descriptions], clean: bool}",
         ])
 
-        return []  # Real LLM path would go here; architecture: IMPLEMENTED
+        from mathmodel.routing.profile import TaskProfile, TaskType
+
+        class ReviewOutput(BaseModel):
+            issues: list[str] = Field(default_factory=list)
+            clean: bool = True
+
+        try:
+            profile = TaskProfile.for_task_type(TaskType.PAPER_GENERATION)
+            output = await self._router.route_structured_generate(
+                profile=profile,
+                prompt=prompt,
+                output_schema=ReviewOutput,
+                system_prompt=(
+                    "You are a semantic paper reviewer. Flag overclaims and "
+                    "unsupported conclusions honestly; do not fabricate issues."
+                ),
+            )
+            if isinstance(output, ReviewOutput):
+                return list(output.issues)
+            return [f"Unexpected reviewer output type: {type(output).__name__}"]
+        except Exception as e:
+            return [f"Semantic review LLM call failed: {str(e)[:200]}"]

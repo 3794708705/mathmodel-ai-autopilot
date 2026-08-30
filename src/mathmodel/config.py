@@ -27,6 +27,7 @@ class ProviderType(str, Enum):
     OPENAI = "openai"
     GOOGLE = "google"
     ANTHROPIC = "anthropic"
+    DEEPSEEK = "deepseek"
     MOCK = "mock"
 
 
@@ -78,6 +79,11 @@ class Settings(BaseSettings):
     anthropic_api_key: Optional[SecretStr] = None
     anthropic_default_model: str = "claude-sonnet-4-20250514"
 
+    # DeepSeek
+    deepseek_api_key: Optional[SecretStr] = None
+    deepseek_default_model: str = "deepseek-v4-flash"
+    deepseek_reasoning_model: str = "deepseek-v4-pro"
+
     # ── Model Routing ────────────────────────────────────────
     model_router_enabled: bool = True
     model_escalation_enabled: bool = True
@@ -111,6 +117,7 @@ class Settings(BaseSettings):
             ProviderType.OPENAI: self.openai_api_key,
             ProviderType.GOOGLE: self.google_api_key,
             ProviderType.ANTHROPIC: self.anthropic_api_key,
+            ProviderType.DEEPSEEK: self.deepseek_api_key,
         }
         secret = key_map.get(provider)
         if secret is None:

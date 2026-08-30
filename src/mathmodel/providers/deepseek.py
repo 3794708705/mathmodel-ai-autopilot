@@ -87,13 +87,31 @@ class DeepSeekProvider(BaseModelProvider):
         self, request: StructuredGenerationRequest
     ) -> BaseModel:
         client = self._get_client()
-        messages = self._build_messages(request.prompt, request.system_prompt)
         model = request.model or self.default_model
+
+        # DeepSeek (OpenAI-compatible) requires the word "json" in the
+        # prompt for response_format=json_object. Append the schema to
+        # the prompt so the model knows the expected JSON shape. Keep the
+        # FULL schema (required fields included) — the compact form caused
+        # the model to omit required nested fields.
+        schema_json = json.dumps(request.output_schema.model_json_schema())
+        enhanced_prompt = (
+            f"{request.prompt}\n\n"
+            f"You must respond with ONLY a valid JSON object conforming "
+            f"to this JSON schema:\n{schema_json}\n"
+            f"Do not include any explanation or markdown fences. "
+            f"All fields marked 'required' MUST be present."
+        )
+
+        messages = self._build_messages(enhanced_prompt, request.system_prompt)
+
+        # Large structured schemas need headroom: avoid finish_reason=length
+        max_tokens = max(request.max_tokens, 16384)
 
         response = await client.chat.completions.create(
             model=model,
             messages=messages,
-            max_tokens=request.max_tokens,
+            max_tokens=max_tokens,
             temperature=request.temperature,
             response_format={"type": "json_object"},
         )
@@ -107,7 +125,7 @@ class DeepSeekProvider(BaseModelProvider):
         )
         self._record_usage(usage)
 
-        parsed = json.loads(content)
+        parsed = json.loads(content, strict=False)
         return request.output_schema.model_validate(parsed)
 
     async def stream(self, request: GenerationRequest) -> AsyncIterator[str]:
@@ -135,3 +153,28 @@ class DeepSeekProvider(BaseModelProvider):
             messages.append({"role": "system", "content": system_prompt})
         messages.append({"role": "user", "content": prompt})
         return messages
+
+    @staticmethod
+    def _compact_schema(schema: dict) -> dict:
+        """Reduce a JSON schema to field names + types to keep prompts small.
+
+        Large nested schemas (e.g. ProblemAnalysis) balloon the prompt and
+        cause the model to hit max_tokens mid-JSON (finish_reason=length).
+        This keeps structure but drops descriptions/defaults/examples.
+        """
+        def strip(node):
+            if isinstance(node, dict):
+                out = {}
+                for key in ("type", "properties", "items", "required"):
+                    if key in node:
+                        out[key] = strip(node[key])
+                if "anyOf" in node:
+                    out["anyOf"] = [strip(o) for o in node["anyOf"]]
+                if "enum" in node:
+                    out["enum"] = node["enum"]
+                return out
+            if isinstance(node, list):
+                return [strip(x) for x in node]
+            return node
+
+        return strip(schema)

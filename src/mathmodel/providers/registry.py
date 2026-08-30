@@ -11,6 +11,7 @@ from typing import Optional
 from mathmodel.config import ProviderType, get_settings
 from mathmodel.providers.anthropic import AnthropicProvider
 from mathmodel.providers.base import BaseModelProvider
+from mathmodel.providers.deepseek import DeepSeekProvider
 from mathmodel.providers.google import GoogleProvider
 from mathmodel.providers.mock import MockProvider
 from mathmodel.providers.openai import OpenAIProvider
@@ -124,6 +125,17 @@ class ProviderRegistry:
             return AnthropicProvider(
                 api_key=api_key,
                 default_model=settings.anthropic_default_model,
+            )
+
+        if provider_type == ProviderType.DEEPSEEK:
+            api_key = settings.get_api_key(ProviderType.DEEPSEEK)
+            if not api_key:
+                return _mock_or_raise(
+                    "DeepSeek", "DEEPSEEK_API_KEY", settings.deepseek_default_model,
+                )
+            return DeepSeekProvider(
+                api_key=api_key,
+                default_model=settings.deepseek_default_model,
             )
 
         raise ValueError(f"Unknown provider type: {provider_type}")
