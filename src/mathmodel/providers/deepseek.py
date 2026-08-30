@@ -7,11 +7,14 @@ This provider reuses the OpenAI client with DeepSeek defaults.
 from __future__ import annotations
 
 import json
+import logging
 import os
 from typing import Any, AsyncIterator, Optional, Type
 
 from openai import AsyncOpenAI
 from pydantic import BaseModel
+
+logger = logging.getLogger(__name__)
 
 from mathmodel.providers.base import (
     BaseModelProvider,
@@ -90,11 +93,12 @@ class DeepSeekProvider(BaseModelProvider):
         model = request.model or self.default_model
 
         # DeepSeek (OpenAI-compatible) requires the word "json" in the
-        # prompt for response_format=json_object. Append the schema to
-        # the prompt so the model knows the expected JSON shape. Keep the
-        # FULL schema (required fields included) — the compact form caused
-        # the model to omit required nested fields.
-        schema_json = json.dumps(request.output_schema.model_json_schema())
+        # prompt for response_format=json_object. Use compact schema
+        # to keep prompt size manageable for API gateways with limits.
+        # Preserve required fields to avoid model omitting nested fields.
+        full_schema = request.output_schema.model_json_schema()
+        compact_schema = self._compact_schema(full_schema)
+        schema_json = json.dumps(compact_schema)
         enhanced_prompt = (
             f"{request.prompt}\n\n"
             f"You must respond with ONLY a valid JSON object conforming "
@@ -106,15 +110,32 @@ class DeepSeekProvider(BaseModelProvider):
         messages = self._build_messages(enhanced_prompt, request.system_prompt)
 
         # Large structured schemas need headroom: avoid finish_reason=length
-        max_tokens = max(request.max_tokens, 16384)
+        max_tokens = max(request.max_tokens, 4096)
 
-        response = await client.chat.completions.create(
-            model=model,
-            messages=messages,
-            max_tokens=max_tokens,
-            temperature=request.temperature,
-            response_format={"type": "json_object"},
-        )
+        # Try with response_format first; fall back to prompt-only JSON
+        # if the provider rejects json_object mode (some API gateways).
+        try:
+            response = await client.chat.completions.create(
+                model=model,
+                messages=messages,
+                max_tokens=max_tokens,
+                temperature=request.temperature,
+                response_format={"type": "json_object"},
+            )
+        except Exception as e:
+            msg = str(e)
+            if "403" in msg or "denied" in msg.lower() or "json_object" in msg.lower() or "response_format" in msg.lower():
+                logger.warning(
+                    "response_format=json_object rejected (403/denied), falling back to prompt-only JSON"
+                )
+                response = await client.chat.completions.create(
+                    model=model,
+                    messages=messages,
+                    max_tokens=max_tokens,
+                    temperature=request.temperature,
+                )
+            else:
+                raise
 
         choice = response.choices[0]
         content = choice.message.content or "{}"
@@ -156,25 +177,37 @@ class DeepSeekProvider(BaseModelProvider):
 
     @staticmethod
     def _compact_schema(schema: dict) -> dict:
-        """Reduce a JSON schema to field names + types to keep prompts small.
+        """Reduce a JSON schema to minimal structure for prompt size.
 
-        Large nested schemas (e.g. ProblemAnalysis) balloon the prompt and
-        cause the model to hit max_tokens mid-JSON (finish_reason=length).
-        This keeps structure but drops descriptions/defaults/examples.
+        For very large schemas (ProblemAnalysis), only keep top-level
+        field names and types to stay within API gateway prompt limits.
         """
-        def strip(node):
+        def strip(node, depth=0):
             if isinstance(node, dict):
+                # At depth > 2, only keep type to avoid ballooning
+                if depth > 2:
+                    return {"type": node.get("type", "object")}
                 out = {}
                 for key in ("type", "properties", "items", "required"):
                     if key in node:
-                        out[key] = strip(node[key])
+                        if key == "properties" and depth >= 1:
+                            # At depth 1, only keep field names + types
+                            props = {}
+                            for pname, pval in node[key].items():
+                                if isinstance(pval, dict):
+                                    props[pname] = {"type": pval.get("type", "string")}
+                                else:
+                                    props[pname] = pval
+                            out[key] = props
+                        else:
+                            out[key] = strip(node[key], depth + 1)
                 if "anyOf" in node:
-                    out["anyOf"] = [strip(o) for o in node["anyOf"]]
+                    out["anyOf"] = [strip(o, depth + 1) for o in node["anyOf"]]
                 if "enum" in node:
                     out["enum"] = node["enum"]
                 return out
             if isinstance(node, list):
-                return [strip(x) for x in node]
+                return [strip(x, depth) for x in node]
             return node
 
         return strip(schema)
