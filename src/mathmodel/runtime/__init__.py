@@ -107,6 +107,17 @@ class RuntimeDecision:
     source: str = "policy"
     policy_version: str = "1.0"
     deadline_passed: bool = False
+    max_age_seconds: float = 120.0  # Decision expires after 2 minutes
+
+    def is_fresh(self, now: Optional[datetime] = None) -> bool:
+        """Whether this decision is still valid (not expired)."""
+        now = now or datetime.now(timezone.utc)
+        age = (now - self.timestamp).total_seconds()
+        return age <= self.max_age_seconds
+
+    def seconds_until_expiry(self, now: Optional[datetime] = None) -> float:
+        now = now or datetime.now(timezone.utc)
+        return max(0.0, self.max_age_seconds - (now - self.timestamp).total_seconds())
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -177,6 +188,20 @@ class CompetitionRuntimePolicy:
     # None = no restriction by policy (trust agent context).
     ACTION_MODE_MATRIX: dict[RuntimeAction, dict[RuntimeMode, AuthResult]] = {
         # ── Exploration ──────────────────────────────────────
+        RuntimeAction.PROBLEM_REINTERPRET: {
+            RuntimeMode.EXPLORATION: AuthResult.ALLOW,
+            RuntimeMode.STANDARD: AuthResult.ALLOW_WITH_WARNING,
+            RuntimeMode.FOCUS: AuthResult.BLOCK,
+            RuntimeMode.MODEL_FREEZE: AuthResult.BLOCK,
+            RuntimeMode.SUBMISSION_MODE: AuthResult.BLOCK,
+        },
+        RuntimeAction.MODEL_SELECT: {
+            RuntimeMode.EXPLORATION: AuthResult.ALLOW,
+            RuntimeMode.STANDARD: AuthResult.ALLOW,
+            RuntimeMode.FOCUS: AuthResult.ALLOW_WITH_WARNING,
+            RuntimeMode.MODEL_FREEZE: AuthResult.HUMAN_REVIEW,
+            RuntimeMode.SUBMISSION_MODE: AuthResult.HUMAN_REVIEW,
+        },
         RuntimeAction.MODEL_EXPLORE: {
             RuntimeMode.EXPLORATION: AuthResult.ALLOW,
             RuntimeMode.STANDARD: AuthResult.ALLOW_WITH_WARNING,
@@ -380,13 +405,39 @@ class CompetitionRuntimePolicy:
         self,
         deadline: Optional[datetime],
         current_time: Optional[datetime] = None,
+        competition_timezone: Optional[str] = None,
     ) -> RuntimeDecision:
-        """Compute the current runtime mode from deadline and current time."""
+        """Compute the current runtime mode from deadline and current time.
+
+        competition_timezone: IANA timezone name (e.g. 'Asia/Shanghai').
+        If the deadline is naive (no tzinfo), it is localized to this
+        timezone. If both deadline.tzinfo AND competition_timezone are
+        missing, the naive deadline is treated as UTC with an explicit
+        WARNING — this is not silently accepted.
+        """
         now = current_time or self._clock()
         now = now if now.tzinfo else now.replace(tzinfo=timezone.utc)
 
+        warnings = []
+
         if deadline is not None and deadline.tzinfo is None:
-            deadline = deadline.replace(tzinfo=timezone.utc)
+            if competition_timezone:
+                try:
+                    from zoneinfo import ZoneInfo
+                    deadline = deadline.replace(tzinfo=ZoneInfo(competition_timezone))
+                except Exception:
+                    warnings.append(
+                        f"DEADLINE_TIMEZONE_UNKNOWN: competition_timezone "
+                        f"'{competition_timezone}' not recognized — treating as UTC"
+                    )
+                    deadline = deadline.replace(tzinfo=timezone.utc)
+            else:
+                warnings.append(
+                    "DEADLINE_NAIVE_ASSUMED_UTC: deadline has no timezone "
+                    "and no competition_timezone configured. Treated as UTC. "
+                    "This may be WRONG for non-UTC competitions."
+                )
+                deadline = deadline.replace(tzinfo=timezone.utc)
 
         if deadline is None:
             return RuntimeDecision(
@@ -395,7 +446,7 @@ class CompetitionRuntimePolicy:
                 mode=RuntimeMode.STANDARD,
                 previous_mode=self._previous_mode,
                 transition_reason="Deadline unknown — keeping STANDARD",
-                warnings=["DEADLINE_UNKNOWN"],
+                warnings=["DEADLINE_UNKNOWN"] + warnings,
                 source="policy",
                 deadline_passed=False,
             )
@@ -421,7 +472,6 @@ class CompetitionRuntimePolicy:
         transition_reason = self._build_transition_reason(mode, remaining_hours)
         deadline_passed = remaining <= 0
 
-        warnings = []
         if deadline_passed:
             warnings.append("DEADLINE_PASSED")
         if mode == RuntimeMode.MODEL_FREEZE:
@@ -490,11 +540,15 @@ class CompetitionRuntimePolicy:
         Critical correctness repairs that would normally be blocked
         are allowed through (with HUMAN_REVIEW) if unresolved_critical=True.
         """
+        # Stale decision check
+        if not decision.is_fresh():
+            return AuthResult.HUMAN_REVIEW
+
         mode = decision.mode
 
-        # Default: consult matrix
+        # Default: unknown action → fail-closed (HUMAN_REVIEW)
         matrix = self.ACTION_MODE_MATRIX.get(action, {})
-        result = matrix.get(mode, AuthResult.ALLOW)
+        result = matrix.get(mode, AuthResult.HUMAN_REVIEW)
 
         # Critical correctness exception: even in SUBMISSION_MODE,
         # a critical repair (e.g. objective sign error) must be
