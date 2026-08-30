@@ -29,8 +29,12 @@ class ExecutionStatus(str, Enum):
     SUCCESS = "success"
     FAILED = "failed"
     TIMED_OUT = "timed_out"
-    MEMORY_EXCEEDED = "memory_exceeded"
+    OOM_KILLED = "oom_killed"
     SECURITY_VIOLATION = "security_violation"
+    RESOURCE_LIMIT = "resource_limit"
+    BACKEND_UNAVAILABLE = "backend_unavailable"
+    SETUP_ERROR = "setup_error"
+    UNKNOWN = "unknown"
 
 
 @dataclass
@@ -39,10 +43,15 @@ class SandboxLimits:
     timeout_seconds: int = 30
     max_memory_mb: int = 512
     max_disk_mb: int = 100
-    max_processes: int = 1
+    max_processes: int = 50
+    max_cpu: float = 1.0
     network_enabled: bool = False
     read_only_filesystem: bool = True
     allow_subprocess: bool = False
+    max_stdout_bytes: int = 100_000
+    max_stderr_bytes: int = 100_000
+    max_artifact_count: int = 100
+    max_artifact_size_bytes: int = 10 * 1024 * 1024
 
 
 @dataclass
@@ -56,6 +65,9 @@ class ExecutionRecord:
     code_version: str = ""
     backend: str = ""
     backend_type: str = ""  # "local_test", "docker", "mock"
+    container_id: str = ""
+    image: str = ""
+    image_digest: str = ""
     environment: str = ""
     started_at: Optional[datetime] = None
     finished_at: Optional[datetime] = None
@@ -64,12 +76,29 @@ class ExecutionRecord:
     stdout: str = ""
     stderr: str = ""
     timed_out: bool = False
+    oom_killed: bool = False
     memory_exceeded: bool = False
+    output_truncated: bool = False
     artifacts: list[str] = field(default_factory=list)
+    input_hashes: dict[str, Any] = field(default_factory=dict)
+    output_hashes: dict[str, Any] = field(default_factory=dict)
     metrics: dict[str, Any] = field(default_factory=dict)
     is_mock: bool = False
-    execution_real: bool = False  # True if real Python/subprocess executed
-    production_safe: bool = False  # True only for Docker/production backends
+    execution_real: bool = False
+    production_safe: bool = False
+    # Isolation capabilities
+    network_isolated: bool = False
+    filesystem_isolated: bool = False
+    secret_isolated: bool = False
+    non_root: bool = False
+    no_new_privileges: bool = False
+    docker_socket_absent: bool = True
+    pid_limit: bool = False
+    memory_limit: bool = False
+    timeout: bool = False
+    resource_limits_enforced: bool = False
+    artifact_containment: bool = False
+    security_violation: bool = False
     status: ExecutionStatus = ExecutionStatus.PENDING
 
     @staticmethod
@@ -134,6 +163,15 @@ class LocalTestSandboxBackend(SandboxBackend):
             execution_real=True,  # Real subprocess execution
             production_safe=False,  # Local = not production safe
             is_mock=False,  # Not a mock — real execution
+            network_isolated=False,
+            filesystem_isolated=False,
+            secret_isolated=False,
+            non_root=False,
+            pid_limit=False,
+            memory_limit=False,
+            timeout=True,  # subprocess timeout enforced
+            resource_limits_enforced=False,
+            artifact_containment=False,
         )
 
         # Create isolated working directory
