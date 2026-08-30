@@ -83,6 +83,12 @@ class ChangeImpactAnalyzer:
             result.affected_ids.extend(
                 [f"con:{c}" for c in (before_con ^ after_con)]
             )
+        # Critical constraint removal
+        from mathmodel.integrity import is_critical_constraint_removal
+        result.single_critical_constraint_removed = is_critical_constraint_removal(
+            before.get("constraints", []), after.get("constraints", []),
+            constraint_importances=before.get("constraint_importances"),
+        )
 
         # Variables
         before_var = self._extract_ids(before.get("variables", []))
