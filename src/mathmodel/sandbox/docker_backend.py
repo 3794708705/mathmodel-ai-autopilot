@@ -121,6 +121,12 @@ class DockerSandboxBackend(SandboxBackend):
             non_root=True,
             no_new_privileges=True,
             docker_socket_absent=True,
+            pid_limit=True,
+            memory_limit=True,
+            timeout=True,
+            resource_limits_enforced=True,
+            artifact_containment=True,
+            image=self._image,
         )
 
         if not self._available:
