@@ -74,6 +74,8 @@ class RealityTrace:
     """Tracks real vs mock vs fixture usage across a run."""
 
     real_llm_calls: int = 0
+    real_llm_attempts: int = 0  # ALL real provider calls (including failures)
+    real_llm_failures: int = 0  # Calls that failed (schema, truncation, etc.)
     mock_llm_calls: int = 0
     real_search_queries: int = 0
     fixture_records_used: int = 0
@@ -85,11 +87,14 @@ class RealityTrace:
     started_at: Optional[datetime] = None
     finished_at: Optional[datetime] = None
 
-    def record_llm_call(self, mock: bool) -> None:
+    def record_llm_call(self, mock: bool, success: bool = True) -> None:
+        self.real_llm_attempts += 1
         if mock:
             self.mock_llm_calls += 1
-        else:
+        elif success:
             self.real_llm_calls += 1
+        else:
+            self.real_llm_failures += 1
 
     def record_search(self, real: bool) -> None:
         if real:
@@ -122,6 +127,8 @@ class RealityTrace:
     def as_dict(self) -> dict[str, Any]:
         return {
             "real_llm_calls": self.real_llm_calls,
+            "real_llm_attempts": self.real_llm_attempts,
+            "real_llm_failures": self.real_llm_failures,
             "mock_llm_calls": self.mock_llm_calls,
             "real_search_queries": self.real_search_queries,
             "fixture_records_used": self.fixture_records_used,
