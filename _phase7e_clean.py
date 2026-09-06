@@ -119,18 +119,15 @@ async def main():
     rt_decision = RUNTIME.compute_mode(deadline)
     print(f"Runtime: {rt_decision.mode.value}")
 
-    # ── ProblemAgent ──────────────────────────────────────────
-    print("\n--- ProblemAgent ---")
+    # ── ProblemAgent (staged) ──────────────────────────────────
+    print("\n--- ProblemAgent (staged) ---")
     state = ProblemState(raw_problem=problem_text, title="Emergency Resource Allocation")
     pa = ProblemAgent(router=ROUTER)
-    pa_result = await pa.run(state)
-    # Retry on failure (LLM truncation/stochastic issues)
-    for attempt in range(1, 4):
-        if pa_result.status.value == "completed":
-            break
-        print(f"  ProblemAgent retry {attempt}...")
-        await asyncio.sleep(2)
-        pa_result = await pa.run(state)
+    pa_result = await pa._run_staged(state)
+    print(f"  ProblemAgent status: {pa_result.status.value}")
+    if pa_result.errors:
+        for e in pa_result.errors:
+            print(f"  Error: {e.message[:300]}")
     if pa_result.status.value == "completed":
         analysis = load_analysis(state)
         if analysis:
@@ -371,8 +368,8 @@ The optimal allocation satisfies all constraints.
     try:
         sub = SubmissionCheckAgent(profile=PROFILE)
         check = sub.check(paper)
-        record("submission_check", "PASS" if not check.blocking_issues else "ISSUES",
-               f"blocking={len(check.blocking_issues)}")
+        record("submission_check", "PASS" if not check.failures else "ISSUES",
+               f"failures={len(check.failures)}")
     except Exception as e:
         record("submission_check", "ERROR", str(e)[:100])
 

@@ -278,6 +278,15 @@ class ProblemAgent(BaseAgent):
                 impact=AmbiguityImpact.MEDIUM,
             ))
 
+        # Normalize task types: only keep valid enum values
+        valid_tasks = []
+        for t in a.task_types:
+            cleaned = t.strip().lower().replace(" ", "_")
+            if cleaned in ModelingTaskType.__members__:
+                valid_tasks.append(cleaned)
+        if not valid_tasks:
+            valid_tasks = ["optimization"]  # safe default
+
         return ProblemAnalysis(
             analysis_id=f"PA-{len(a.objective)}obj",
             background=a.concise_summary,
@@ -288,7 +297,7 @@ class ProblemAgent(BaseAgent):
             ambiguities=ambiguities,
             explicit_constraints=d.explicit_constraints,
             implicit_conditions=d.implicit_conditions,
-            modeling_tasks=a.task_types,
+            modeling_tasks=valid_tasks,
             expected_outputs=d.evaluation_criteria,
             data_requirements=[d_ref.text for d_ref in b.data_refs],
         )

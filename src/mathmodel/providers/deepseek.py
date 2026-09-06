@@ -93,16 +93,8 @@ class DeepSeekProvider(BaseModelProvider):
         client = self._get_client()
         model = request.model or self.default_model
 
-        # Use full schema for native DeepSeek (handles large prompts).
-        # Compact schema kept for MaaS gateways with prompt limits.
-        full_schema = request.output_schema.model_json_schema()
-        # Quick check: if schema is small enough, use full; otherwise compact
-        schema_str = json.dumps(full_schema)
-        if len(schema_str) < 4000:
-            schema_json = schema_str
-        else:
-            compact = self._compact_schema(full_schema)
-            schema_json = json.dumps(compact)
+        # Use full schema. Native DeepSeek handles large prompts well.
+        schema_json = json.dumps(request.output_schema.model_json_schema())
         enhanced_prompt = (
             f"{request.prompt}\n\n"
             f"You must respond with ONLY a valid JSON object conforming "
