@@ -124,6 +124,13 @@ async def main():
     state = ProblemState(raw_problem=problem_text, title="Emergency Resource Allocation")
     pa = ProblemAgent(router=ROUTER)
     pa_result = await pa.run(state)
+    # Retry on failure (LLM truncation/stochastic issues)
+    for attempt in range(1, 4):
+        if pa_result.status.value == "completed":
+            break
+        print(f"  ProblemAgent retry {attempt}...")
+        await asyncio.sleep(2)
+        pa_result = await pa.run(state)
     if pa_result.status.value == "completed":
         analysis = load_analysis(state)
         if analysis:

@@ -6,6 +6,7 @@ This provider reuses the OpenAI client with DeepSeek defaults.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -93,12 +94,10 @@ class DeepSeekProvider(BaseModelProvider):
         model = request.model or self.default_model
 
         # DeepSeek (OpenAI-compatible) requires the word "json" in the
-        # prompt for response_format=json_object. Use compact schema
-        # to keep prompt size manageable for API gateways with limits.
-        # Preserve required fields to avoid model omitting nested fields.
-        full_schema = request.output_schema.model_json_schema()
-        compact_schema = self._compact_schema(full_schema)
-        schema_json = json.dumps(compact_schema)
+        # prompt for response_format=json_object. Use the full schema
+        # — the compact version caused the model to omit required
+        # nested fields like expected_outputs, content, source, enums.
+        schema_json = json.dumps(request.output_schema.model_json_schema())
         enhanced_prompt = (
             f"{request.prompt}\n\n"
             f"You must respond with ONLY a valid JSON object conforming "
@@ -110,7 +109,7 @@ class DeepSeekProvider(BaseModelProvider):
         messages = self._build_messages(enhanced_prompt, request.system_prompt)
 
         # Large structured schemas need headroom: avoid finish_reason=length
-        max_tokens = max(request.max_tokens, 4096)
+        max_tokens = max(request.max_tokens, 8192)
 
         # Try with response_format first; fall back to prompt-only JSON
         # if the provider rejects json_object mode (some API gateways).
@@ -177,25 +176,30 @@ class DeepSeekProvider(BaseModelProvider):
 
     @staticmethod
     def _compact_schema(schema: dict) -> dict:
-        """Reduce a JSON schema to minimal structure for prompt size.
+        """Reduce a JSON schema to keep prompt size manageable.
 
-        For very large schemas (ProblemAnalysis), only keep top-level
-        field names and types to stay within API gateway prompt limits.
+        Keeps field names, types, required markers, and enum values.
+        Drops descriptions, defaults, examples, and deep nesting.
+        Target: ~500-2000 chars for typical schemas.
         """
         def strip(node, depth=0):
             if isinstance(node, dict):
-                # At depth > 2, only keep type to avoid ballooning
-                if depth > 2:
-                    return {"type": node.get("type", "object")}
+                if depth > 3:
+                    return {"type": node.get("type", "string")}
                 out = {}
                 for key in ("type", "properties", "items", "required"):
                     if key in node:
                         if key == "properties" and depth >= 1:
-                            # At depth 1, only keep field names + types
                             props = {}
                             for pname, pval in node[key].items():
                                 if isinstance(pval, dict):
-                                    props[pname] = {"type": pval.get("type", "string")}
+                                    prop_type = pval.get("type", "string")
+                                    entry = {"type": prop_type}
+                                    if "enum" in pval:
+                                        entry["enum"] = pval["enum"]
+                                    if "items" in pval:
+                                        entry["items"] = strip(pval["items"], depth + 2)
+                                    props[pname] = entry
                                 else:
                                     props[pname] = pval
                             out[key] = props
@@ -205,6 +209,8 @@ class DeepSeekProvider(BaseModelProvider):
                     out["anyOf"] = [strip(o, depth + 1) for o in node["anyOf"]]
                 if "enum" in node:
                     out["enum"] = node["enum"]
+                if "additionalProperties" in node:
+                    out["additionalProperties"] = node["additionalProperties"]
                 return out
             if isinstance(node, list):
                 return [strip(x, depth) for x in node]
