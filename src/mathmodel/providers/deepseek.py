@@ -93,11 +93,16 @@ class DeepSeekProvider(BaseModelProvider):
         client = self._get_client()
         model = request.model or self.default_model
 
-        # DeepSeek (OpenAI-compatible) requires the word "json" in the
-        # prompt for response_format=json_object. Use the full schema
-        # — the compact version caused the model to omit required
-        # nested fields like expected_outputs, content, source, enums.
-        schema_json = json.dumps(request.output_schema.model_json_schema())
+        # Use full schema for native DeepSeek (handles large prompts).
+        # Compact schema kept for MaaS gateways with prompt limits.
+        full_schema = request.output_schema.model_json_schema()
+        # Quick check: if schema is small enough, use full; otherwise compact
+        schema_str = json.dumps(full_schema)
+        if len(schema_str) < 4000:
+            schema_json = schema_str
+        else:
+            compact = self._compact_schema(full_schema)
+            schema_json = json.dumps(compact)
         enhanced_prompt = (
             f"{request.prompt}\n\n"
             f"You must respond with ONLY a valid JSON object conforming "
@@ -109,7 +114,7 @@ class DeepSeekProvider(BaseModelProvider):
         messages = self._build_messages(enhanced_prompt, request.system_prompt)
 
         # Large structured schemas need headroom: avoid finish_reason=length
-        max_tokens = max(request.max_tokens, 8192)
+        max_tokens = max(request.max_tokens, 4096)
 
         # Try with response_format first; fall back to prompt-only JSON
         # if the provider rejects json_object mode (some API gateways).

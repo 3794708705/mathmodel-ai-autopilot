@@ -370,7 +370,7 @@ The optimal allocation satisfies all constraints.
     print("\n--- SubmissionCheck ---")
     try:
         sub = SubmissionCheckAgent(profile=PROFILE)
-        check = await sub.check(state, paper, EvidenceStore())
+        check = sub.check(paper)
         record("submission_check", "PASS" if not check.blocking_issues else "ISSUES",
                f"blocking={len(check.blocking_issues)}")
     except Exception as e:

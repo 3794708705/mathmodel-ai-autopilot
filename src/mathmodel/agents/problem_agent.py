@@ -262,6 +262,8 @@ class ProblemAgent(BaseAgent):
             subproblems.append(Subproblem(
                 subproblem_id=f"SP-{i+1}",
                 description=sp,
+                original_text=sp,
+                normalized_goal=sp[:100],
                 task_types=[],
                 expected_outputs=[],
             ))
