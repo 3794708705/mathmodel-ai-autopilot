@@ -1,0 +1,183 @@
+{
+  "run": "r05",
+  "note": "A real run whose verification report was accepted as PASS while the answer was wrong. Every check in it is a property of the INPUT data; nothing judged whether the solution answered the question. Kept as a regression sample for the verification gate.",
+  "problem": "2026 CUMCM D (time-frequency conflict detection and resolution)",
+  "model": "global:deepseek-v4.1-flash",
+  "required_outputs": [
+    "result1.xlsx",
+    "result2.xlsx",
+    "result3.xlsx",
+    "result4.xlsx"
+  ],
+  "verifier_summary": {
+    "checks": [
+      {
+        "name": "independent_recomputation",
+        "status": "PASS",
+        "detail": "recomputed conflict statistics from expanded slot sets",
+        "evidence": {
+          "recomputed": {
+            "num_plans": 150,
+            "category_counts": {
+              "A": 20,
+              "B": 40,
+              "C": 90
+            },
+            "num_conflicts": 297,
+            "max_degree": 8,
+            "num_plans_in_conflict": 148,
+            "num_isolated_plans": 2,
+            "conflicts_by_category_pair": {
+              "AB": 21,
+              "AC": 66,
+              "BC": 181,
+              "BB": 10,
+              "CC": 19
+            }
+          },
+          "mismatches": [],
+          "example_rule_check": "A001 expands to 3 uses starting at t=35,95,155 across bands 80..89; verified=False"
+        }
+      },
+      {
+        "name": "constraint_1",
+        "status": "PASS",
+        "detail": "band ranges within [0,100]: observed [0,100)",
+        "evidence": {
+          "n": 150,
+          "max_hi": 100,
+          "min_lo": 0
+        }
+      },
+      {
+        "name": "constraint_2",
+        "status": "PASS",
+        "detail": "use counts positive: [3, 4, 12]",
+        "evidence": {
+          "n": 150,
+          "values": [
+            3,
+            4,
+            12
+          ]
+        }
+      },
+      {
+        "name": "constraint_3",
+        "status": "PASS",
+        "detail": "interval lengths positive",
+        "evidence": {
+          "n": 150,
+          "min_dur": 2
+        }
+      },
+      {
+        "name": "constraint_4",
+        "status": "PASS",
+        "detail": "gap values: [8, 40, 60]",
+        "evidence": {
+          "n": 150,
+          "values": [
+            8,
+            40,
+            60
+          ]
+        }
+      },
+      {
+        "name": "constraint_5",
+        "status": "NOT_APPLICABLE",
+        "detail": "no explicit numeric translation bound encoded as separate input field",
+        "evidence": {
+          "note": "band/time shift bounds (10,5) checked where applicable"
+        }
+      },
+      {
+        "name": "constraint_satisfaction",
+        "status": "PASS",
+        "detail": "result1 conflict pairs match independent recomputation",
+        "evidence": {
+          "rows_in_file": 297,
+          "computed_pairs": 297,
+          "missing_from_file": [],
+          "extra_in_file": []
+        }
+      },
+      {
+        "name": "feasibility",
+        "status": "PASS",
+        "detail": "checked 150 adjustments",
+        "evidence": {
+          "checked": 150,
+          "counterexamples": [],
+          "listing_out": [
+            "result1.xlsx",
+            "result2.xlsx",
+            "result3.xlsx",
+            "result4.xlsx"
+          ]
+        }
+      },
+      {
+        "name": "result4_bounds",
+        "status": "PASS",
+        "detail": "checked 150 adjustments",
+        "evidence": {
+          "checked": 150,
+          "counterexamples": [],
+          "listing_out": [
+            "result1.xlsx",
+            "result2.xlsx",
+            "result3.xlsx",
+            "result4.xlsx"
+          ]
+        }
+      },
+      {
+        "name": "small_case_check",
+        "status": "PASS",
+        "detail": "constructed 3-plan case: expected a-c overlap, a-b no overlap",
+        "evidence": {
+          "result": true
+        }
+      },
+      {
+        "name": "baseline_comparison",
+        "status": "PASS",
+        "detail": "baseline = keep-all counts reported; solution kept<=baseline",
+        "evidence": {
+          "baseline_keep_all": {
+            "A": 20,
+            "B": 40,
+            "C": 90
+          },
+          "reported_kept": {
+            "A": 20,
+            "B": 40,
+            "C": 90
+          }
+        }
+      },
+      {
+        "name": "statistics_agree",
+        "status": "PASS",
+        "detail": "14 statistic(s) independently reproduced",
+        "evidence": {
+          "compared": 14
+        }
+      }
+    ],
+    "input_records": 150,
+    "statistics": {},
+    "overall": "PASS"
+  },
+  "independent_ground_truth": {
+    "verdict": "WRONG",
+    "result1_conflict_pairs": 297,
+    "result2_rows": 150,
+    "result2_cancelled": 0,
+    "result2_residual_conflicts": 297,
+    "result3_rows": 0,
+    "result4_residual_conflicts": 297
+  }
+}

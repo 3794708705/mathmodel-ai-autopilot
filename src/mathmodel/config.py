@@ -83,6 +83,9 @@ class Settings(BaseSettings):
     deepseek_api_key: Optional[SecretStr] = None
     deepseek_default_model: str = "deepseek-v4-flash"
     deepseek_reasoning_model: str = "deepseek-v4-pro"
+    # These models otherwise spend the whole output budget on reasoning and
+    # return nothing usable. Set to "" to let the provider decide.
+    deepseek_reasoning_effort: str = "minimal"
 
     # ── Model Routing ────────────────────────────────────────
     model_router_enabled: bool = True

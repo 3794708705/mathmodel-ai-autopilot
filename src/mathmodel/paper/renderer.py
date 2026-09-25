@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -38,8 +39,32 @@ class CompilationRecord:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
+_INLINE_MATH_RE = re.compile(r"\$([^$]+)\$")
+
+
 def _latex_escape(text: str) -> str:
-    """Escape LaTeX special characters."""
+    """Escape LaTeX special characters, preserving inline math.
+
+    Model-written prose contains inline math such as ``$\\Delta t$``. Escaping
+    the dollar signs turns real notation into the literal characters
+    ``$\\textbackslash{}Delta t$`` on the page, so ``$...$`` spans are passed
+    through untouched. The injection guard still scans the whole document, so
+    nothing dangerous can hide inside a math span.
+    """
+    if "$" not in text:
+        return _escape_latex_chars(text)
+
+    parts: list[str] = []
+    cursor = 0
+    for match in _INLINE_MATH_RE.finditer(text):
+        parts.append(_escape_latex_chars(text[cursor:match.start()]))
+        parts.append("$" + match.group(1) + "$")
+        cursor = match.end()
+    parts.append(_escape_latex_chars(text[cursor:]))
+    return "".join(parts)
+
+
+def _escape_latex_chars(text: str) -> str:
     replacements = {
         "\\": r"\textbackslash{}",
         "&": r"\&",
@@ -57,7 +82,10 @@ def _latex_escape(text: str) -> str:
     return text
 
 
-# Dangerous LaTeX primitives that must never pass through from content
+# Dangerous LaTeX primitives that must never pass through from content.
+# Each entry is matched as a COMPLETE control sequence: LaTeX command names are
+# runs of letters, so "\include" must not fire on the legitimate
+# "\includegraphics", and "\input" must not fire on "\inputencoding".
 FORBIDDEN_TEX_PATTERNS = [
     r"\input",
     r"\include",
@@ -72,14 +100,22 @@ FORBIDDEN_TEX_PATTERNS = [
     r"\special{",
 ]
 
+_FORBIDDEN_TEX_RE = re.compile(
+    "|".join(
+        # Only a pattern ending in a letter is a bare command name, and only
+        # those need the "not followed by another letter" guard. A pattern that
+        # already carries its own delimiter ("\special{") is complete as written.
+        re.escape(pattern) + (r"(?![A-Za-z])" if pattern[-1].isalpha() else "")
+        for pattern in FORBIDDEN_TEX_PATTERNS
+    )
+)
+
 
 def _check_latex_injection(tex: str) -> list[str]:
     """Detect dangerous LaTeX commands. Returns list of issues."""
     issues = []
-    lowered = tex.lower()
-    for pattern in FORBIDDEN_TEX_PATTERNS:
-        if pattern.lower() in lowered:
-            issues.append(f"Dangerous LaTeX command detected: {pattern}")
+    for match in _FORBIDDEN_TEX_RE.finditer(tex):
+        issues.append(f"Dangerous LaTeX command detected: {match.group(0)}")
     return issues
 
 
@@ -223,10 +259,11 @@ class LaTeXRenderer:
                 [compiler, "-interaction=nonstopmode", "paper.tex"],
                 capture_output=True, text=True, timeout=120,
                 cwd=str(work_dir),
+                encoding="utf-8", errors="replace",
             )
             record.exit_code = result.returncode
-            record.stdout = result.stdout[-20_000:]
-            record.stderr = result.stderr[-20_000:]
+            record.stdout = (result.stdout or "")[-20_000:]
+            record.stderr = (result.stderr or "")[-20_000:]
             record.success = result.returncode == 0
 
             pdf_path = work_dir / "paper.pdf"

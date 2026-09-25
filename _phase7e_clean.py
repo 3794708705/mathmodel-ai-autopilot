@@ -174,10 +174,7 @@ async def main():
     candidates = []
     if pa_result.status.value == "completed":
         explorer = ModelExplorer(router=ROUTER)
-        for attempt in range(1, 4):
-            exp_result = await explorer.run(state)
-            if exp_result.status.value == "completed":
-                break
+        exp_result = await explorer._run_staged(state)
         if exp_result.status.value == "completed":
             candidates = load_candidates(state) or []
             record("model_explorer", "PASS", f"candidates={len(candidates)}")

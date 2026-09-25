@@ -32,6 +32,13 @@ class GenerationRequest:
     temperature: float = 0.7
     stop_sequences: Optional[list[str]] = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    # Providers that support hybrid reasoning accept "none"/"minimal"/... here.
+    # Long deterministic outputs (generated programs) must set this, otherwise
+    # the model spends the entire output budget on reasoning and returns nothing.
+    reasoning_effort: Optional[str] = None
+    # Gateway-specific escape hatch, e.g. {"thinking": {"type": "disabled"}} for
+    # endpoints that ignore reasoning_effort and always reason.
+    extra_body: Optional[dict[str, Any]] = None
 
 
 @dataclass
@@ -44,6 +51,7 @@ class StructuredGenerationRequest:
     max_tokens: int = 4096
     temperature: float = 0.7
     metadata: dict[str, Any] = field(default_factory=dict)
+    reasoning_effort: Optional[str] = None
 
 
 @dataclass

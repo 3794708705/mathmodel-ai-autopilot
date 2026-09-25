@@ -338,3 +338,76 @@ class ModelExplorer(BaseAgent):
             "You generate genuinely diverse candidate models, not minor variations. "
             "You never fabricate results or performance claims."
         )
+
+    async def _run_staged(self, state: ProblemState) -> AgentResult:
+        """Staged: candidate planning → individual generation → assembly."""
+        from pydantic import BaseModel, Field
+
+        class CandidatePlan(BaseModel):
+            candidate_count: int = Field(default=3, ge=1, le=5)
+            families: list[str] = Field(default_factory=list)
+            rationales: list[str] = Field(default_factory=list)
+
+        class SingleCandidateWrapper(BaseModel):
+            candidate: ModelCandidate = Field(default_factory=ModelCandidate)
+
+        result = self._start_result()
+        analysis = load_analysis(state)
+        if not analysis:
+            return self._finish_result(result, AgentStatus.FAILED,
+                errors=[AgentError(message="No ProblemAnalysis found", error_type="prerequisite")])
+
+        profile = TaskProfile.for_task_type(TaskType.MODEL_EXPLORATION)
+        prompt = self._build_prompt(analysis, state)
+        system = self._system_prompt()
+
+        # Pass 1: Candidate planning (small schema)
+        plan_prompt = f"{prompt}\n\nPlan 3-5 diverse model candidates. Output: candidate_count, families, rationales."
+        try:
+            plan = await self._router.route_structured_generate(
+                profile=profile, prompt=plan_prompt,
+                output_schema=CandidatePlan, system_prompt=system,
+            )
+            if not isinstance(plan, CandidatePlan):
+                plan = CandidatePlan(candidate_count=3, families=["linear_programming", "integer_programming", "network_flow"],
+                                     rationales=["Standard LP for allocation", "IP for discrete decisions", "Network flow for routing"])
+        except Exception:
+            plan = CandidatePlan(candidate_count=3, families=["linear_programming", "integer_programming", "network_flow"],
+                                 rationales=["Standard LP", "IP variant", "Network flow"])
+
+        # Pass 2: Individual candidate generation
+        candidates = []
+        for i in range(min(plan.candidate_count, 5)):
+            family = plan.families[i] if i < len(plan.families) else f"candidate_{i}"
+            rationale = plan.rationales[i] if i < len(plan.rationales) else ""
+            cand_prompt = (
+                f"{prompt}\n\nGenerate candidate #{i+1}: family={family}, rationale={rationale}. "
+                f"Output ONE complete ModelCandidate with all required fields."
+            )
+            try:
+                wrapper = await self._router.route_structured_generate(
+                    profile=profile, prompt=cand_prompt,
+                    output_schema=SingleCandidateWrapper, system_prompt=system,
+                )
+                if isinstance(wrapper, SingleCandidateWrapper) and wrapper.candidate:
+                    wrapper.candidate.candidate_id = f"CAND-{i+1}"
+                    candidates.append(wrapper.candidate)
+            except Exception:
+                pass
+
+        if len(candidates) < 3:
+            return self._finish_result(result, AgentStatus.FAILED,
+                errors=[AgentError(message=f"Only {len(candidates)} valid candidates (need >=3)", error_type="insufficient")])
+
+        # Diversity check
+        diversity_issues = self._check_diversity(candidates)
+        if diversity_issues:
+            return self._finish_result(result, AgentStatus.FAILED,
+                errors=[AgentError(message=f"Diversity: {'; '.join(diversity_issues)}", error_type="diversity")])
+
+        store_candidates(state, candidates)
+        record_revision(state, self.name, ProblemStateStage.EXPLORE,
+                        f"Staged: {len(candidates)} candidates")
+        state.current_stage = ProblemStateStage.EXPLORE
+        return self._finish_result(result, AgentStatus.COMPLETED,
+                                   output={"candidate_count": len(candidates)})

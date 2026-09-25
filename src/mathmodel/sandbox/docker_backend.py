@@ -33,6 +33,7 @@ def _docker_available() -> bool:
         result = subprocess.run(
             ["docker", "info", "--format", "{{.ServerVersion}}"],
             capture_output=True, text=True, timeout=10,
+            encoding="utf-8", errors="replace",
         )
         return result.returncode == 0
     except Exception:
@@ -45,6 +46,7 @@ def _docker_image_present(image: str) -> bool:
         result = subprocess.run(
             ["docker", "image", "inspect", image],
             capture_output=True, text=True, timeout=10,
+            encoding="utf-8", errors="replace",
         )
         return result.returncode == 0
     except Exception:
@@ -104,8 +106,13 @@ class DockerSandboxBackend(SandboxBackend):
         code: str,
         limits: SandboxLimits,
         input_files: Optional[dict[str, str]] = None,
+        capture_dir: Optional[str | Path] = None,
     ) -> ExecutionRecord:
-        """Execute code in an ephemeral Docker container."""
+        """Execute code in an ephemeral Docker container.
+
+        capture_dir: when given, artifacts are copied there before the
+        ephemeral workspace is destroyed, so callers can keep them.
+        """
         record = ExecutionRecord(
             backend=self.backend_name,
             backend_type="docker",
@@ -217,12 +224,16 @@ class DockerSandboxBackend(SandboxBackend):
                     capture_output=True,
                     text=True,
                     timeout=limits.timeout_seconds + 10,  # Docker overhead
+                    # Generated programs print Chinese diagnostics. Decoding with
+                    # this host's GBK locale raises in the reader thread and leaves
+                    # stdout as None, losing the program's entire output.
+                    encoding="utf-8", errors="replace",
                 )
                 elapsed = time.time() - start
 
                 record.exit_code = result.returncode
-                record.stdout = result.stdout[:100_000]
-                record.stderr = result.stderr[:100_000]
+                record.stdout = (result.stdout or "")[:100_000]
+                record.stderr = (result.stderr or "")[:100_000]
                 record.runtime_seconds = round(elapsed, 3)
                 record.timed_out = False
 
@@ -277,6 +288,20 @@ class DockerSandboxBackend(SandboxBackend):
 
         finally:
             record.finished_at = datetime.now(timezone.utc)
+            # Persist artifacts for the caller before the workspace is destroyed
+            if capture_dir is not None:
+                try:
+                    target = Path(capture_dir)
+                    target.mkdir(parents=True, exist_ok=True)
+                    for rel in record.artifacts:
+                        src = Path(work_dir) / "output" / rel
+                        if not src.is_file():
+                            continue
+                        dest = target / rel
+                        dest.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(src, dest)
+                except Exception as exc:  # capture failure must not mask execution
+                    record.metrics.setdefault("capture_error", str(exc))
             # Cleanup workspace
             try:
                 shutil.rmtree(work_dir, ignore_errors=True)

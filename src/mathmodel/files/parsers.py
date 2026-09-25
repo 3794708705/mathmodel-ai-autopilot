@@ -101,6 +101,18 @@ class CsvParser:
         return table, profile
 
     @staticmethod
+    def _cell_to_str(row: list[Any], idx: int) -> Optional[str]:
+        """Render one Excel cell as a string for profiling (None stays None)."""
+        if idx >= len(row):
+            return None
+        value = row[idx]
+        if value is None:
+            return None
+        if isinstance(value, float) and value.is_integer():
+            return str(int(value))
+        return str(value)
+
+    @staticmethod
     def _profile_column(
         idx: int, name: str, values: list[Optional[str]]
     ) -> ColumnProfile:
@@ -214,11 +226,18 @@ class CsvParser:
 # ═══════════════════════════════════════════════════════════════
 
 class ExcelParser:
-    """Parser for Excel (.xlsx, .xls) files."""
+    """Parser for Excel (.xlsx, .xls) files.
+
+    Reads real cell values — headers, rows, and per-column profiles.
+    A sheet is never summarized from its filename or dimensions alone.
+    """
 
     @staticmethod
-    def parse_sheets(file_record: FileRecord) -> dict[str, DataTable]:
-        """Parse all sheets and return a dict of sheet_name -> DataTable."""
+    def read_sheets(file_record: FileRecord) -> dict[str, dict[str, Any]]:
+        """Read every sheet with real cell values.
+
+        Returns {sheet_name: {"headers": [...], "rows": [[...], ...]}}.
+        """
         try:
             import openpyxl
         except ImportError:
@@ -227,44 +246,67 @@ class ExcelParser:
         path = Path(file_record.storage_path)
         wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
 
-        tables = {}
-        for sheet_name in wb.sheetnames:
-            ws = wb[sheet_name]
-            rows = list(ws.iter_rows(values_only=True))
-            if not rows:
-                continue
+        sheets: dict[str, dict[str, Any]] = {}
+        try:
+            for sheet_name in wb.sheetnames:
+                ws = wb[sheet_name]
+                raw_rows = list(ws.iter_rows(values_only=True))
+                if not raw_rows:
+                    continue
+                headers = [
+                    str(c) if c is not None else f"Column_{i}"
+                    for i, c in enumerate(raw_rows[0])
+                ]
+                rows = [list(r) for r in raw_rows[1:]]
+                sheets[sheet_name] = {"headers": headers, "rows": rows}
+        finally:
+            wb.close()
 
-            headers = [str(c) if c is not None else f"Column_{i}" for i, c in enumerate(rows[0])]
-            data_rows = rows[1:]
+        return sheets
 
+    @staticmethod
+    def parse_sheets(file_record: FileRecord) -> dict[str, DataTable]:
+        """Parse all sheets and return a dict of sheet_name -> DataTable."""
+        sheets = ExcelParser.read_sheets(file_record)
+        tables: dict[str, DataTable] = {}
+        for sheet_name, data in sheets.items():
+            headers = data["headers"]
+            rows = data["rows"]
             table = DataTable(
                 name=sheet_name,
                 source=f"{file_record.original_name}:{sheet_name}",
-                row_count=len(data_rows),
+                row_count=len(rows),
                 column_count=len(headers),
             )
+            for idx, header in enumerate(headers):
+                col = CsvParser._profile_column(
+                    idx, header, [CsvParser._cell_to_str(r, idx) for r in rows]
+                )
+                table.columns.append(col.column_id)
+                table.metadata.setdefault("columns", []).append(col.model_dump())
             tables[sheet_name] = table
-
-        wb.close()
         return tables
 
     @staticmethod
     def parse(file_record: FileRecord) -> tuple[list[DataTable], list[DataProfile]]:
-        """Parse an Excel file and return tables + profiles."""
-        tables_dict = ExcelParser.parse_sheets(file_record)
+        """Parse an Excel file and return tables + real profiles."""
         tables = []
         profiles = []
 
-        for sheet_name, table in tables_dict.items():
+        for table in ExcelParser.parse_sheets(file_record).values():
             tables.append(table)
-            # For Excel, create a basic profile
-            profile = DataProfile(
+            column_profiles = [
+                ColumnProfile.model_validate(c)
+                for c in table.metadata.get("columns", [])
+            ]
+            profiles.append(DataProfile(
                 dataset_id="",
                 table_id=table.table_id,
                 row_count=table.row_count,
                 column_count=table.column_count,
-            )
-            profiles.append(profile)
+                columns=column_profiles,
+                total_missing=sum(c.missing_count for c in column_profiles),
+            ))
 
         return tables, profiles
 
@@ -280,18 +322,26 @@ class PdfParser:
     def parse(file_record: FileRecord) -> dict[str, Any]:
         """Parse a PDF and return structured content."""
         path = Path(file_record.storage_path)
-        try:
-            import PyPDF2
-        except ImportError:
-            # Try pikepdf or pdfplumber
+        reader_cls = None
+        reader_name = ""
+        for module_name in ("pypdf", "PyPDF2"):
             try:
-                import pdfplumber
+                module = __import__(module_name)
+                reader_cls = module.PdfReader
+                reader_name = module_name
+                break
+            except ImportError:
+                continue
+
+        if reader_cls is None:
+            try:
+                import pdfplumber  # noqa: F401
                 return PdfParser._parse_with_pdfplumber(path)
             except ImportError:
                 return PdfParser._parse_metadata_only(path)
 
         try:
-            reader = PyPDF2.PdfReader(str(path))
+            reader = reader_cls(str(path))
             page_count = len(reader.pages)
             pages = []
             for i, page in enumerate(reader.pages):
@@ -308,7 +358,7 @@ class PdfParser:
                 "total_chars": sum(p["char_count"] for p in pages),
                 "metadata": dict(reader.metadata or {}),
                 "is_image_only": all(p["char_count"] == 0 for p in pages),
-                "parser": "PyPDF2",
+                "parser": reader_name,
             }
         except Exception as e:
             return {

@@ -50,3 +50,19 @@ output/
 
 # Docker
 *.pid
+# Local working state: run artifacts, scratch files and measurement output.
+# These are large (hundreds of MB) and reproducible from the source, so they
+# are never part of the repository.
+.tmp/
+runs/
+_dryrun_clean_output/
+_dryrun_output/
+
+# Unrelated projects that happen to live in this working directory.
+KindleTransfer/
+wxauto-4.0/
+
+# Stray scratch files from earlier work.
+_pelican_preview.png
+pelican-bicycle.html
+pelican-bicycle.svg
