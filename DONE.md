@@ -59,3 +59,19 @@
   ```
   产物在 `runs/<run_id>/output/`：`paper.pdf`、`support/**`、`manifest.json`。
 - 原生 goal 收尾状态：本目标为单会话连续实施，未创建 dsh 原生 goal，无需终态更新。
+
+## 2026-09-27 — 修复 autopilot 流程缺陷：资格门接通、出版复用、ledger 加固
+- 当时约定的交付范围：用户先问「程序整体流程有问题吗」，在得到缺陷清单后指示「有问题就去优化修复问题，没问题就上传 GitHub」，按推荐范围（项目代码+测试+文档，排除并发会话文件与生成物）提交推送。
+- 交付物与位置：提交 `bc2fe18`，已推送到 `origin/master`（`github.com/3794708705/mathmodel-ai-autopilot`），21 个文件 +8308/−253。
+- 验收证据：
+  - A1 `select` 不再硬编码 `eligible=True`（`pipeline.py` 原 `reason="autopilot intake"` 占位），改为运行真实 `EligibilityGate(policy=EligibilityPolicy())`，无适格候选即 block；stage detail 记录 `N/M candidate(s) eligible`。证据：`tests/test_pipeline_flow_repairs.py::test_a_candidate_that_violates_a_hard_constraint_is_never_scored`（真实 `_drive` 到 select，jury 被 monkeypatch 成"一旦调用即失败"）；`_verify_eligibility_wiring.py` 用真实归档候选复算 5/5 仍 eligible，证明不会误杀真实运行。
+  - A2 出版半场恢复复用：`figures`/`tables`/`paper` 在 `artifacts/paper/publication_inputs.json` 指纹（已验证 outcome run_id、model version、statistics、subproblems、output summaries）一致且图片文件仍在时整体复用；`audit`/`pdf`/`package`/`final_check` 仍重跑。证据：`_verify_publication_reuse.py` 在真实 completed run（`runs/reliability/c03`，PASS 于 attempt 3）上 5/5——复用后 0 次模型调用（outline/section/abstract/propose 全 0）、`paper_id` 与 8 个章节不变、run 仍 `completed`；改 `math_model.json` 的 version 后指纹不匹配，`propose` 确实被调用（拒绝陈旧复用）。单测 4 个分支见 `tests/test_pipeline_flow_repairs.py`。
+  - A3 两处潜伏 bug：已验证尝试的回看不再绑定 `MAX_REPAIR_ATTEMPTS`（改读盘上 `report*.json`），`_report_artifact` 按 `attempt<N>` 目录名解析（原 `solve_dir.name[-1]` 会把 attempt10 写成 `report0.json`）。证据：`test_verified_attempts_are_read_from_disk_newest_first`、`test_a_verified_attempt_above_the_repair_limit_is_still_found`、`test_attempt_numbers_come_from_the_name_not_its_last_digit`。
+  - A4 本轮发现的 ledger 真实缺陷：写入 `problem_states` JSON 列时把 domain `metadata_` 中的 datetime 原样放入，触发 `Object of type datetime is not JSON serializable` 并让 ledger 整个自禁用；现统一经 `_json_safe`（datetime→ISO）归一化。证据：`tests/test_run_ledger.py::test_ledger_stores_a_domain_state_that_carries_datetimes`；真实 resumed run 日志中不再出现 "Run ledger disabled"。
+  - A5 `clarify`/`registries` 补 `begin`，消除 `attempts=0`、`started_at` 为空与 `current_stage` 不反映的阶段语义不一致。
+  - A6 全量回归：`.\.venv\Scripts\python.exe -m pytest -q` → **1045 passed, 1 skipped**（基线 1035+1，新增 10 个测试）。
+  - A7 `_verify_run_ledger.py` 重放真实归档运行 17/17。
+- 审查结论：自审 + 三个独立脚本在真实运行数据上复核；未做用户签收外的额外审查。
+- 必要限制：未接 SENSITIVITY/ROBUSTNESS/RED_TEAM 阶段（`domain/verification.py` 已有模型但零调用，论文 8 个小节也无灵敏度/稳健性小节）、literature/`CitationVerifier`（`submission/__init__.py:340` 分支恒假）、reality/budget/integrity/runtime/solver/verification 等约 4900 行仅测试可达；`NEEDS_CONFIRMATION` 仍是死状态；`RunState.load` 会忽略传入目录、沿用 state 文件里的 `run_dir`（未改，验证脚本内自行重定向）；本轮仍未做一次完整实跑（缺模型凭据）。
+- 最短使用方法：`git pull` 后 `pytest`；中断的续跑用 `mathmodel resume <run_dir>`，已产出出版物的运行会直接复用论文与图表。
+- 原生 goal 收尾状态：交付验收已通过，待提交 complete。
