@@ -62,6 +62,14 @@ class ProblemState(Base, TimestampMixin):
         Uuid, primary_key=True, default=uuid.uuid4
     )
 
+    # ── Run linkage ──────────────────────────────────────────
+    # One row per autopilot run. The run ledger keeps this row in sync with
+    # `<run_dir>/pipeline_state.json`; runs created through the REST API
+    # leave it null because they have no run directory.
+    run_id: Mapped[Optional[str]] = mapped_column(
+        String(255), nullable=True, unique=True, index=True
+    )
+
     # ── Identification ───────────────────────────────────────
     project_id: Mapped[Optional[str]] = mapped_column(
         String(255), nullable=True, index=True

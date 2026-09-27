@@ -63,6 +63,22 @@ class Settings(BaseSettings):
     database_echo: bool = False
     database_pool_size: int = 5
     database_max_overflow: int = 10
+    database_connect_timeout: int = Field(
+        default=5,
+        description=(
+            "Seconds to wait for a database connection. The run ledger stops "
+            "writing after the first failure, so an unreachable database must "
+            "fail fast instead of stalling a run."
+        ),
+    )
+    database_auto_create: bool = Field(
+        default=True,
+        description=(
+            "Create missing tables on first use. This project has no Alembic "
+            "versions yet, so without this the run ledger would find no table "
+            "to record runs into."
+        ),
+    )
 
     # ── Model Providers ──────────────────────────────────────
     default_provider: ProviderType = ProviderType.MOCK

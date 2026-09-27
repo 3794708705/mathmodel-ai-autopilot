@@ -42,15 +42,33 @@ get_settings.cache_clear()
 
 from mathmodel.autopilot import CUMCMAutopilot  # noqa: E402
 
-CASE = ROOT / ".tmp" / "case_dti"
-FILES = [
-    CASE / "D题.pdf",
-    CASE / "附件1.xlsx",
-    CASE / "result1.xlsx",
-    CASE / "result2.xlsx",
-    CASE / "result3.xlsx",
-    CASE / "result4.xlsx",
-]
+CASES = {
+    # 2026 CUMCM D: time-frequency conflict detection and resolution.
+    "dti": (
+        ROOT / ".tmp" / "case_dti",
+        [
+            "D题.pdf", "附件1.xlsx",
+            "result1.xlsx", "result2.xlsx", "result3.xlsx", "result4.xlsx",
+        ],
+    ),
+    # 2026 CUMCM A: drying of medicinal materials.
+    "a2026": (
+        ROOT / ".tmp" / "case_a2026" / "A题",
+        [
+            "A题.pdf",
+            "附件/附件1.xlsx",
+            "附件/附件2.xlsx",
+            "附件/附件3/result1.xlsx",
+            "附件/附件3/result2.xlsx",
+            "附件/附件3/result3.xlsx",
+            "附件/附件3/result4.xlsx",
+        ],
+    ),
+}
+
+CASE_NAME = os.environ.get("MATHMODEL_CASE", "dti")
+CASE_DIR, CASE_FILES = CASES[CASE_NAME]
+FILES = [CASE_DIR / name for name in CASE_FILES]
 
 
 async def main() -> int:
@@ -59,11 +77,18 @@ async def main() -> int:
     print(f"provider={provider} model={settings.openai_default_model} "
           f"base_url={os.environ.get('OPENAI_BASE_URL', '-')}", flush=True)
 
-    autopilot = CUMCMAutopilot(workspace=str(ROOT / "runs"))
+    # The repair budget is a run setting, not a code default: the gate it has to
+    # satisfy is unchanged either way, so trying a larger budget spends compute
+    # rather than weakening acceptance.
+    repair_attempts = os.environ.get("MATHMODEL_REPAIR_ATTEMPTS")
+    autopilot = CUMCMAutopilot(
+        workspace=str(ROOT / "runs"),
+        **({"max_repair_attempts": int(repair_attempts)} if repair_attempts else {}),
+    )
     result = await autopilot.run(
         problem_files=FILES,
         competition="CUMCM",
-        run_id=os.environ.get("MATHMODEL_RUN_ID", "cumcm-2026-dti-e2e"),
+        run_id=os.environ.get("MATHMODEL_RUN_ID", f"cumcm-2026-{CASE_NAME}-e2e"),
     )
 
     (ROOT / ".tmp" / "last_result.json").write_text(

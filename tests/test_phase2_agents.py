@@ -8,6 +8,13 @@ Does NOT require real LLM calls — uses MockProvider.
 import asyncio
 import pytest
 
+from unittest.mock import patch
+
+
+async def _no_sleep(_seconds):
+    """Keep the retry test instant."""
+    return None
+
 from mathmodel.agents.problem_agent import ProblemAgent
 from mathmodel.agents.model_explorer import ModelExplorer
 from mathmodel.agents.eligibility_gate import EligibilityGate
@@ -277,6 +284,44 @@ class TestEligibilityGateAgent:
 # ═══════════════════════════════════════════════════════════════
 
 class TestModelJuryAgent:
+    def test_a_transient_gateway_error_does_not_kill_the_run(self, db_session):
+        """Real failure: one `httpx2.ReadError` -> `openai.APIConnectionError`
+        from the jury's scoring call propagated out of `run` and ended a run
+        `blocked` with "model selection failed", discarding a completed intake,
+        understanding, evidence extraction and candidate exploration."""
+        from mathmodel.agents.model_jury import ModelJury
+
+        calls = {"n": 0}
+        inner = make_router()
+
+        class Flaky:
+            async def route_structured_generate(self, **kwargs):
+                calls["n"] += 1
+                if calls["n"] < 3:
+                    raise ConnectionError("simulated transport blip")
+                return await inner.route_structured_generate(**kwargs)
+
+            def __getattr__(self, name):
+                return getattr(inner, name)
+
+        jury = ModelJury(router=Flaky())
+        state = make_state()
+        store_candidates(state, FIXTURE_A_CANDIDATES)
+        from mathmodel.domain.state_helpers import store_eligibility_results
+        from mathmodel.domain.eligibility import EligibilityResult
+
+        store_eligibility_results(state, [
+            EligibilityResult(candidate_id=c.candidate_id, eligible=True,
+                              reason="Test eligible")
+            for c in FIXTURE_A_CANDIDATES
+        ])
+
+        with patch("mathmodel.agents.model_jury.asyncio.sleep", new=_no_sleep):
+            result = asyncio.run(jury.run(state))
+
+        assert calls["n"] >= 3, "the transport error was not retried"
+        assert result.status.value != "failed"
+
     def test_requires_candidates(self, db_session):
         jury = ModelJury(router=make_router())
         state = make_state()

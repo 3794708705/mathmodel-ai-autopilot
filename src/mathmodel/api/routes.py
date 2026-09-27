@@ -33,14 +33,28 @@ router = APIRouter(prefix="/api/v1", tags=["v1"])
 
 VALID_STAGE_TRANSITIONS: dict[ProblemStateStage, set[ProblemStateStage]] = {
     ProblemStateStage.INGEST: {ProblemStateStage.UNDERSTAND},
-    ProblemStateStage.UNDERSTAND: {ProblemStateStage.DATA, ProblemStateStage.LITERATURE},
+    # UNDERSTAND → EXPLORE: the autopilot runtime has no separate data or
+    # literature stage; it builds those registries while understanding and
+    # goes straight on to exploring candidate models.
+    ProblemStateStage.UNDERSTAND: {
+        ProblemStateStage.DATA,
+        ProblemStateStage.LITERATURE,
+        ProblemStateStage.EXPLORE,
+    },
     ProblemStateStage.DATA: {ProblemStateStage.LITERATURE, ProblemStateStage.EXPLORE},
     ProblemStateStage.LITERATURE: {ProblemStateStage.EXPLORE},
     ProblemStateStage.EXPLORE: {ProblemStateStage.SELECT},
     ProblemStateStage.SELECT: {ProblemStateStage.MODEL},
     ProblemStateStage.MODEL: {ProblemStateStage.SOLVE},
     ProblemStateStage.SOLVE: {ProblemStateStage.VALIDATE},
-    ProblemStateStage.VALIDATE: {ProblemStateStage.SENSITIVITY, ProblemStateStage.RED_TEAM},
+    # VALIDATE → PAPER: a verified run writes the paper next.
+    # VALIDATE → MODEL: verification failure sends the model back for repair.
+    ProblemStateStage.VALIDATE: {
+        ProblemStateStage.SENSITIVITY,
+        ProblemStateStage.RED_TEAM,
+        ProblemStateStage.PAPER,
+        ProblemStateStage.MODEL,
+    },
     ProblemStateStage.SENSITIVITY: {ProblemStateStage.ROBUSTNESS},
     ProblemStateStage.ROBUSTNESS: {ProblemStateStage.RED_TEAM},
     ProblemStateStage.RED_TEAM: {ProblemStateStage.MODEL, ProblemStateStage.PAPER},

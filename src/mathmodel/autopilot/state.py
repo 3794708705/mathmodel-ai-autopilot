@@ -10,10 +10,10 @@ import json
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 from uuid import uuid4
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, PrivateAttr
 
 
 def _now() -> datetime:
@@ -80,6 +80,21 @@ class RunState(BaseModel):
 
     counters: dict[str, int] = Field(default_factory=dict)
     notes: list[str] = Field(default_factory=list)
+
+    # Process-local wiring, deliberately kept out of serialization: a loaded
+    # state must not carry a callback that belonged to another process.
+    _watcher: Optional[Callable[["RunState"], None]] = PrivateAttr(default=None)
+
+    # ── Change notification ───────────────────────────────────
+
+    def watch(self, callback: Optional[Callable[["RunState"], None]]) -> None:
+        """Register a callback invoked after every change to this run."""
+        self._watcher = callback
+
+    def notify(self) -> None:
+        """Announce the current state to the watcher, if one is registered."""
+        if self._watcher is not None:
+            self._watcher(self)
 
     # ── Stage helpers ─────────────────────────────────────────
 
@@ -166,6 +181,7 @@ class RunState(BaseModel):
             json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
         )
         tmp.replace(path)
+        self.notify()
 
     @classmethod
     def load(cls, run_dir: str | Path) -> "RunState":

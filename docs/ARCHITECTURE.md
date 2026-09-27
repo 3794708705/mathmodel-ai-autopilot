@@ -45,6 +45,10 @@ MathModel AI is an end-to-end AI automation system for mathematical modeling com
 - SQLAlchemy ORM models
 - Alembic migrations
 - PostgreSQL with optional pgvector
+- `autopilot/ledger.py` is the single writer for runs: it mirrors each run's
+  stage progress, results and verification verdict into its `problem_states`
+  row. The run directory keeps the state that resumes a run; the database
+  keeps the record of it, and no run reads its own row back.
 
 ## Separation of Concerns
 

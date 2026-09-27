@@ -39,11 +39,19 @@ def _get_sync_engine():
         from sqlalchemy import create_engine
         from sqlalchemy.orm import sessionmaker
 
+        # A database that is down must fail fast: the run ledger gives up after
+        # the first failure, and a dropped connection would otherwise stall a
+        # run for the OS-level TCP timeout.
+        connect_args = {}
+        if settings.database_url.startswith("postgresql"):
+            connect_args["connect_timeout"] = settings.database_connect_timeout
+
         _sync_engine = create_engine(
             settings.database_url,
             echo=settings.database_echo,
             pool_size=settings.database_pool_size,
             max_overflow=settings.database_max_overflow,
+            connect_args=connect_args,
         )
         _sync_session_factory = sessionmaker(
             _sync_engine,
@@ -127,6 +135,18 @@ async def get_db() -> AsyncGenerator:
         except Exception:
             await session.rollback()
             raise
+
+
+def get_sync_engine():
+    """Return the lazily created sync engine."""
+    engine, _ = _get_sync_engine()
+    return engine
+
+
+def get_sync_session_factory():
+    """Return the lazily created sync session factory."""
+    _, session_factory = _get_sync_engine()
+    return session_factory
 
 
 def get_sync_db() -> Generator:

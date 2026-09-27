@@ -23,6 +23,7 @@ from typing import Any, Optional
 from pydantic import BaseModel, Field
 
 from mathmodel.agents.base import AgentStatus
+from mathmodel.agents.eligibility_gate import EligibilityGate
 from mathmodel.agents.math_modeler import MathModeler
 from mathmodel.agents.model_explorer import ModelExplorer
 from mathmodel.agents.model_jury import ModelJury
@@ -45,6 +46,7 @@ from mathmodel.autopilot.deliver import (
     drafts_to_paper_ir,
 )
 from mathmodel.autopilot.intake import ProblemContext, ProblemIntake, build_clarification_questions
+from mathmodel.autopilot.ledger import RunLedger
 from mathmodel.autopilot.state import (
     ClarificationQuestion,
     RunState,
@@ -60,17 +62,21 @@ from mathmodel.autopilot.verify import (
     build_report,
     checks_from_independent_summary,
     compare_statistics,
+    describe_solution_files,
+    model_integrates_differential_equations,
+    unevidenced_by_diverged_recomputation,
+    unaccountable_formula_verdict,
 )
 from mathmodel.domain.candidates import ModelCandidate
-from mathmodel.domain.eligibility import EligibilityResult
+from mathmodel.domain.eligibility import EligibilityPolicy
 from mathmodel.domain.math_model import MathematicalModel
 from mathmodel.domain.state_helpers import (
     load_analysis,
     load_candidates,
+    load_eligibility_results,
     load_jury_result,
     store_analysis,
     store_candidates,
-    store_eligibility_results,
     store_jury_result,
 )
 from mathmodel.domain.verification import GateStatus
@@ -83,7 +89,12 @@ from mathmodel.evidence import (
     EvidenceStore,
 )
 from mathmodel.models.problem_state import ProblemState
-from mathmodel.documents import FigureRegistry, TableRegistry
+from mathmodel.documents import (
+    FigureRecord,
+    FigureRegistry,
+    TableRecord,
+    TableRegistry,
+)
 from mathmodel.routing.router import ModelRouter
 from mathmodel.submission import CompetitionProfile, SubmissionCheckAgent, SubmissionStatus
 
@@ -107,6 +118,34 @@ class AutopilotResult(BaseModel):
     stage_summary: dict[str, Any] = Field(default_factory=dict)
     blockers: list[str] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
+
+
+def _verified_attempt_numbers(verify_dir: Path) -> list[int]:
+    """Attempt numbers that have a verification report, newest first.
+
+    Read from disk rather than derived from the current attempt limit: a run
+    verified under a larger limit must stay reusable after that limit is
+    lowered, and raising the limit must not skip an attempt already on disk.
+    """
+    numbers: list[int] = []
+    for path in verify_dir.glob("report*.json"):
+        match = re.fullmatch(r"report(\d+)\.json", path.name)
+        if match is not None:
+            numbers.append(int(match.group(1)))
+    return sorted(numbers, reverse=True)
+
+
+def _report_artifact(verify_dir: Path, solve_dir: Path) -> list[str]:
+    """The verification report that belongs to a cached solver attempt.
+
+    The attempt number is read out of the `attempt<N>` artifact directory
+    instead of its last character: attempt 10 would otherwise be recorded as
+    `report0.json`.
+    """
+    match = re.fullmatch(r"attempt(\d+)", solve_dir.name)
+    if match is None:
+        return []
+    return [str(verify_dir / f"report{match.group(1)}.json")]
 
 
 class CUMCMAutopilot:
@@ -263,6 +302,7 @@ class CUMCMAutopilot:
         self,
         artifacts: "_ArtifactPaths",
         problem_context: ProblemContext,
+        model: MathematicalModel,
     ) -> Optional[tuple[GeneratedProgram, Any, VerificationReport, Path]]:
         """Reload a solver run whose verification already passed.
 
@@ -270,7 +310,7 @@ class CUMCMAutopilot:
         verified: that burns the model budget and can replace a verified answer
         with a different, unverified one.
         """
-        for attempt in range(self._max_repair, 0, -1):
+        for attempt in _verified_attempt_numbers(artifacts.verify):
             report_path = artifacts.verify / f"report{attempt}.json"
             solver_path = artifacts.code / f"attempt{attempt}" / "solver.py"
             outcome_path = artifacts.solve / f"outcome{attempt}.json"
@@ -317,6 +357,11 @@ class CUMCMAutopilot:
                 expected_row_counts=self._expected_row_counts(
                     problem_context, template_headers
                 ),
+                template_sheets=self._template_sheets(problem_context),
+                problem_text=problem_context.problem_text,
+                requires_scheme_validation=model_integrates_differential_equations(
+                    model
+                ),
             )
             failed = [c for c in deterministic if c.status == CheckStatus.FAIL]
             if failed:
@@ -337,6 +382,64 @@ class CUMCMAutopilot:
             return program, outcome, report, solve_dir
         return None
 
+    def _reusable_publication(
+        self,
+        artifacts: "_ArtifactPaths",
+        state: RunState,
+        publication_inputs: dict[str, Any],
+    ) -> Optional[tuple[FigureRegistry, TableRegistry, Any]]:
+        """Reload the figures, tables and paper of an already written run.
+
+        A resumed run must not re-draft a delivered paper, and it must not
+        describe a changed solution with an old one either: the publication is
+        reused only when the verified inputs it was written from are unchanged
+        and every figure it refers to is still on disk. Anything else falls
+        back to writing the publication again.
+        """
+        if not state.is_done("paper"):
+            return None
+        stored = self._load_json(artifacts.paper / "publication_inputs.json")
+        if stored is None or _json_key(stored) != _json_key(publication_inputs):
+            return None
+
+        figure_payloads = self._load_json(artifacts.figures / "figures.json")
+        table_payloads = self._load_json(artifacts.tables / "tables.json")
+        paper_payload = self._load_json(artifacts.paper / "paper_ir.json")
+        if figure_payloads is None or table_payloads is None or paper_payload is None:
+            return None
+
+        from mathmodel.paper import PaperIR
+
+        try:
+            figures = FigureRegistry()
+            for payload in figure_payloads:
+                figures.register(FigureRecord.model_validate(payload))
+            tables = TableRegistry()
+            for payload in table_payloads:
+                tables.register(TableRecord.model_validate(payload))
+            paper = PaperIR.model_validate(paper_payload)
+        except Exception as exc:
+            logger.warning(
+                "The published artifacts of run %s cannot be reused: %s",
+                state.run_id,
+                exc,
+            )
+            return None
+
+        missing = [
+            figure.artifact_path
+            for figure in figures.all()
+            if figure.artifact_path and not Path(figure.artifact_path).exists()
+        ]
+        if missing:
+            logger.warning(
+                "Published figures of run %s are no longer on disk: %s",
+                state.run_id,
+                "; ".join(missing[:5]),
+            )
+            return None
+        return figures, tables, paper
+
     async def _drive(
         self,
         state: RunState,
@@ -344,6 +447,11 @@ class CUMCMAutopilot:
     ) -> AutopilotResult:
         run_dir = Path(state.run_dir)
         artifacts = _ArtifactPaths(run_dir)
+
+        # The database mirrors this run; `pipeline_state.json` above stays the
+        # mechanism that resumes it. A run that cannot reach a database still
+        # runs: the ledger disables itself and says so in the notes.
+        ledger = RunLedger(state)
 
         # Notes describe this attempt. Carrying them across a resume reports
         # problems the current attempt may already have fixed.
@@ -382,6 +490,9 @@ class CUMCMAutopilot:
             problem_context = ProblemContext.model_validate(context)
 
         # ── 2. Clarification ──────────────────────────────────
+        # The stage is begun before it can stop for input, so a run waiting on
+        # clarification still records where it is waiting.
+        state.begin("clarify", "checking whether the upload is sufficient")
         questions = build_clarification_questions(problem_context)
         unanswered = [
             q for q in questions
@@ -407,6 +518,8 @@ class CUMCMAutopilot:
             title=Path(problem_context.problem_file_names[0]).stem if problem_context.problem_file_names else "",
             competition=competition_name(problem_context),
         )
+        # From here on the ledger mirrors this object's reasoning into the row.
+        ledger.observe_domain_state(state_obj)
         analysis = None
         if state.is_done("understand"):
             cached = self._load_json(artifacts.analysis / "analysis.json")
@@ -446,6 +559,7 @@ class CUMCMAutopilot:
             state.complete("understand", "loaded from previous run", [])
 
         # ── 4. Registries: ambiguity / assumptions / data schema ──
+        state.begin("registries", "ambiguity register, assumption ledger, data schema")
         ambiguity_register = self._ambiguity_register(analysis)
         assumption_ledger = self._assumption_ledger(analysis)
         data_schema = self._data_schema(problem_context)
@@ -492,11 +606,6 @@ class CUMCMAutopilot:
                 [str(artifacts.models / "candidates.json")],
             )
 
-        store_eligibility_results(state_obj, [
-            EligibilityResult(candidate_id=c.candidate_id, eligible=True, reason="autopilot intake")
-            for c in candidates
-        ])
-
         # ── 6. Model selection audit ──────────────────────────
         cached_jury = self._load_json(artifacts.models / "jury_result.json")
         if state.is_done("select") and cached_jury:
@@ -506,6 +615,29 @@ class CUMCMAutopilot:
             state.complete("select", "loaded from previous run", [])
         else:
             state.begin("select", "EligibilityGate + ModelJury")
+            # The gate decides which candidates the jury is allowed to score.
+            # It is a deterministic check over the facts the explorer recorded
+            # (required data, plausibility, hard-constraint risks), so it is
+            # executed here rather than every candidate being assumed eligible.
+            gate_result = await EligibilityGate(
+                policy=EligibilityPolicy()
+            ).run(state_obj)
+            if gate_result.status != AgentStatus.COMPLETED:
+                detail = (
+                    "; ".join(e.message for e in gate_result.errors)[:500] or "failed"
+                )
+                state.fail("select", f"EligibilityGate: {detail}")
+                return self._result(
+                    state, blockers=[f"eligibility checking failed: {detail}"]
+                )
+            eligibility = load_eligibility_results(state_obj)
+            eligible = [r for r in eligibility if r.eligible]
+            if not eligible:
+                state.fail("select", "every candidate model failed eligibility")
+                return self._result(
+                    state, blockers=["no candidate model passed eligibility"]
+                )
+
             jury = ModelJury(router=self._router)
             await jury.run(state_obj)
             jury_result = load_jury_result(state_obj)
@@ -521,7 +653,8 @@ class CUMCMAutopilot:
             state.complete(
                 "select",
                 f"selected {jury_result.selected_model}"
-                + (f", backup {jury_result.backup_model}" if jury_result.backup_model else ""),
+                + (f", backup {jury_result.backup_model}" if jury_result.backup_model else "")
+                + f" — {len(eligible)}/{len(eligibility)} candidate(s) eligible",
                 [str(artifacts.models / "model_selection_audit.json")],
             )
 
@@ -577,10 +710,29 @@ class CUMCMAutopilot:
         # is carried into the next attempt's verifier generation instead of
         # being blamed on the solver program.
         carried_verifier_feedback: list[str] = []
+        # How many times each failure class has already been handed to the repair
+        # loop. A repair loop that keeps seeing the same class is not converging,
+        # and the useful thing to say then is not the error again but an
+        # instruction to stop patching the site that reported it.
+        failure_classes: dict[str, int] = {}
+        # (attempt, self-check error / its own tolerance) for each attempt that
+        # reached a usable solver run. Repairs that make a scheme WORSE are the
+        # observed failure mode here: the same problem produced err=0.475 on one
+        # attempt and err=57.319 on another, so a repair loop that always starts
+        # from the latest attempt can walk away from a good discretisation and
+        # never come back.
+        attempt_error_ratios: list[tuple[int, float]] = []
+        # The program text of every attempt that produced one, so that a repair
+        # which is drifting AWAY from a better attempt can be based on that
+        # attempt's code instead of on the worse one it just wrote. Asking the
+        # model to restore the better attempt is only a request; keeping its
+        # program here makes it possible to hand back.
+        attempt_programs: dict[int, str] = {}
+        attempt_failed_criteria: dict[int, list[str]] = {}
 
         for attempt in range(1, self._max_repair + 1):
             if attempt == 1:
-                cached = self._load_verified_attempt(artifacts, problem_context)
+                cached = self._load_verified_attempt(artifacts, problem_context, model)
                 if cached is not None:
                     program, outcome, report, solve_dir = cached
                     logger.info(
@@ -591,7 +743,7 @@ class CUMCMAutopilot:
                         "verify",
                         f"PASS (reused from previous run) — "
                         f"{len(report.checks)} check(s), 0 failures",
-                        [str(artifacts.verify / f"report{solve_dir.name[-1]}.json")],
+                        _report_artifact(artifacts.verify, solve_dir),
                     )
                     break
             state.begin(
@@ -599,6 +751,19 @@ class CUMCMAutopilot:
                 f"attempt {attempt}/{self._max_repair}"
                 + (" (repair)" if feedback else ""),
             )
+            base_code, base_attempt = _repair_base_program(
+                attempt_error_ratios,
+                attempt_programs,
+                attempt - 1,
+                program.code if (program and feedback) else None,
+            )
+            if base_attempt is not None and feedback:
+                feedback = [
+                    f"NOTE: the program you are given is attempt {base_attempt}'s, "
+                    f"NOT the one from the attempt that just failed. That earlier "
+                    f"attempt scored better on the scheme check, so apply your fix "
+                    f"to IT -- do not start from the most recent program."
+                ] + list(feedback)
             try:
                 program = await generator.generate(
                     model=model,
@@ -606,7 +771,7 @@ class CUMCMAutopilot:
                     data_schema=json.dumps(data_schema, ensure_ascii=False, indent=2),
                     required_outputs=problem_context.required_outputs,
                     input_file_names=sorted(input_files),
-                    previous_code=program.code if (program and feedback) else None,
+                    previous_code=base_code,
                     failure_feedback=feedback or None,
                     output_headers=template_headers or None,
                 )
@@ -651,6 +816,14 @@ class CUMCMAutopilot:
                     f"Solver program failed to run: status={outcome.status} exit={outcome.exit_code}",
                     f"stderr tail: {outcome.stderr.strip()[-1500:]}",
                 ]
+                failure_class = _failure_class(outcome.stderr or "")
+                seen = failure_classes.get(failure_class, 0)
+                failure_classes[failure_class] = seen + 1
+                if seen:
+                    feedback.insert(
+                        0,
+                        _repeated_failure_note(failure_class, attempt, seen),
+                    )
                 continue
             state.complete(
                 "solve",
@@ -669,14 +842,47 @@ class CUMCMAutopilot:
                 expected_row_counts=self._expected_row_counts(
                     problem_context, template_headers
                 ),
+                template_sheets=self._template_sheets(problem_context),
+                problem_text=problem_context.problem_text,
+                requires_scheme_validation=model_integrates_differential_equations(
+                    model
+                ),
             )
 
             checks = list(deterministic)
             solver_statistics = (outcome.summary or {}).get("statistics", {}) or {}
+            # The verifier recomputes values, but it cannot check whether the solver
+            # transcribed an empirical formula correctly, because it never sees the
+            # solver's code and may make the same transcription slip itself. Asking
+            # the solver to state the formulas it implemented lets the verifier
+            # compare statement against code directly. This is the one defect class
+            # that produces plausible-looking numbers, so no numeric comparison can
+            # catch it.
+            solver_formulas = (outcome.summary or {}).get("formulas", {}) or {}
+            # The verifier is a separate program that has never seen the solver's
+            # code, so it also has no idea how the output tables are laid out. It
+            # guessed wrong on every run: filtering worksheets by name found
+            # nothing on a template whose sheet is only `Sheet1`, and folding the
+            # time column into the value range made every sheet look like it
+            # spanned 0..t_end, so nothing could be classified and every derived
+            # quantity came back None — which reads as the solver having produced
+            # nothing. The real shape costs nothing to compute and removes the
+            # guesswork.
+            solution_structure = describe_solution_files(
+                solve_dir, problem_context.required_outputs
+            )
             independent_dir = artifacts.verify / f"attempt{attempt}"
             independent_dir.mkdir(parents=True, exist_ok=True)
 
-            if all(c.status != CheckStatus.FAIL for c in deterministic):
+            # The independent verifier is a separate layer, so it is skipped only
+            # when there is genuinely nothing for it to inspect. Gating it on
+            # "no deterministic check failed" meant a single formatting
+            # complaint suppressed every other finding in the same run.
+            outputs_readable = any(
+                c.name == "required_outputs_present" and c.status == CheckStatus.PASS
+                for c in deterministic
+            )
+            if outputs_readable:
                 try:
                     verifier_inputs = dict(input_files)
                     for name in problem_context.required_outputs:
@@ -698,12 +904,14 @@ class CUMCMAutopilot:
                             problem_text=problem_context.problem_text,
                             required_outputs=problem_context.required_outputs,
                             solver_statistics=solver_statistics,
+                            solver_formulas=solver_formulas,
                             available_inputs=sorted(input_files)
                             + [f"output/{n}" for n in problem_context.required_outputs],
                             failure_feedback=verifier_feedback or None,
                             data_schema=json.dumps(
                                 data_schema, ensure_ascii=False, indent=2
                             ),
+                            solution_structure=solution_structure or None,
                         )
                         (independent_dir / f"verifier{verifier_attempt}.py").write_text(
                             verifier_program.code, encoding="utf-8"
@@ -758,6 +966,107 @@ class CUMCMAutopilot:
                             verifier_summary.get("statistics", {}) or {},
                         )
                         checks.append(agreement)
+                        verifier_diverged = (
+                            (agreement.evidence or {}).get("verifier_diverged") or []
+                        )
+                        # The verifier is generated code too, and it can contradict
+                        # itself just as the solver can. A FAIL whose own
+                        # per-formula verdicts all pass says the formulas were
+                        # transcribed correctly, so the verdict is not evidence --
+                        # reading it in place of the detail is the same mistake as
+                        # trusting a solver's bare `passed` flag. Downgrade to
+                        # NOT_RUN, which still fails the report (no standard is
+                        # relaxed) but states the honest reason. Measured on the
+                        # real A problem: a check failed with the detail
+                        # "D_q1=e^-0.89/C ratio; D_q23/D_q4 use exp(-3850/T_K)
+                        # Arrhenius ratio (T in Kelvin)" -- a statement that the
+                        # formulas were correct -- and blocked the run on it.
+                        checks = [
+                            (
+                                check.model_copy(
+                                    update={
+                                        "status": CheckStatus.NOT_RUN,
+                                        "detail": (
+                                            "Not verifiable: the verifier marked "
+                                            "this check FAIL while every per-formula "
+                                            "verdict it reported passes, so the "
+                                            "verdict contradicts its own evidence. "
+                                            f"Original finding: {unaccountable}"
+                                        )[:2000],
+                                    }
+                                )
+                                if (
+                                    unaccountable := unaccountable_formula_verdict(check)
+                                )
+                                is not None
+                                else check
+                            )
+                            for check in checks
+                        ]
+
+                        if verifier_diverged:
+                            # The verifier's own recomputation blew up. The fault is
+                            # in the verifier, so the next attempt must regenerate
+                            # the VERIFIER rather than rewrite a solver whose numbers
+                            # are plausible.
+                            #
+                            # Its own checks must not keep blocking either: a check
+                            # that quotes a diverged number as its counterexample is
+                            # not evidence about the solver. Downgrade exactly those
+                            # checks to NOT_RUN, which still blocks the report (so no
+                            # standard is relaxed) but states the honest reason — the
+                            # value could not be verified — instead of asserting the
+                            # solver is wrong. Measured on the real A problem, a
+                            # verifier reported "max |dT| = 2.67...e+155 C" as its
+                            # counterexample and that FAIL was the run's blocker.
+                            checks = [
+                                (
+                                    check.model_copy(
+                                        update={
+                                            "status": CheckStatus.NOT_RUN,
+                                            "detail": (
+                                                "Not verifiable: this check rested on "
+                                                f"the implausible value {implausible:.6g}, "
+                                                "which comes from the verifier's own "
+                                                "diverged recomputation rather than from "
+                                                f"the solver. Original finding: {check.detail}"
+                                            )[:2000],
+                                        }
+                                    )
+                                    if (
+                                        check.category == "independent"
+                                        and check.status == CheckStatus.FAIL
+                                        and (
+                                            implausible := unevidenced_by_diverged_recomputation(
+                                                check
+                                            )
+                                        )
+                                        is not None
+                                    )
+                                    else check
+                                )
+                                for check in checks
+                            ]
+                            carried_verifier_feedback = [
+                                "Your previous verifier program ran to completion but "
+                                "its own recomputed values diverged: "
+                                + ", ".join(sorted(verifier_diverged)[:8])
+                                + ". Those values cannot be used as a reference, and "
+                                "comparing them with the solver's finite, plausible "
+                                "values produces a disagreement that says nothing "
+                                "about the solver.",
+                                "Recompute them with a numerically stable scheme: "
+                                "prefer an implicit method over an explicit one on a "
+                                "fine grid, keep the time step inside the stability "
+                                "limit, and print the recomputed value alongside a "
+                                "physical bound so a diverged number is visible. If a "
+                                "quantity truly cannot be recomputed stably, omit that "
+                                "key instead of reporting a diverged value.",
+                            ]
+                            logger.warning(
+                                "Independent verifier recomputation diverged on %s",
+                                ", ".join(sorted(verifier_diverged)[:8]),
+                            )
                         if not verifier_summary.get("statistics"):
                             carried_verifier_feedback = [
                                 "Your previous verifier program ran to completion but "
@@ -799,7 +1108,10 @@ class CUMCMAutopilot:
                     name="independent_verifier_executed",
                     category="independent",
                     status=CheckStatus.NOT_RUN,
-                    detail="Skipped because deterministic checks already failed",
+                    detail=(
+                        "Skipped because the required output files are missing or "
+                        "unreadable, so there is nothing to verify"
+                    ),
                 ))
 
             report = build_report(model, outcome.run_id, checks)
@@ -817,27 +1129,47 @@ class CUMCMAutopilot:
                 break
 
             feedback = report.to_prompt_feedback()
-            # When an independent recomputation disagrees on a count, the usual
-            # cause is that the solver mis-derived how a repeated use occupies
-            # the resource. Saying so is far more actionable than the bare
-            # numeric disagreement, which on its own invites guesswork.
-            if any(
-                c.status == CheckStatus.FAIL and "independent" in c.category
-                and any(
-                    word in c.detail
-                    for word in ("recomputed", "claimed", "solver=", "independent=")
-                )
-                for c in report.checks
+            # A repair that makes the scheme worse must be told so. Per-attempt
+            # feedback says what is wrong NOW; it cannot say that the previous
+            # attempt was closer, so the solver has no way to notice it is
+            # oscillating or drifting away from a discretisation that nearly
+            # worked. Measured on this project: the same problem yielded
+            # err=0.475 on one run and err=57.319 on another, and repairs that
+            # rewrote the scheme wholesale produced the worse one.
+            self_check = (outcome.summary or {}).get("self_check") or {}
+            code = getattr(program, "code", None)
+            if code:
+                attempt_programs[attempt] = code
+            try:
+                raw_error = float(self_check.get("max_abs_error"))
+                raw_tolerance = float(self_check.get("tolerance"))
+            except (TypeError, ValueError):
+                raw_error = None
+                raw_tolerance = None
+            if (
+                raw_error is not None
+                and raw_tolerance is not None
+                and raw_tolerance > 0.0
             ):
-                feedback.append(
-                    "An independent recomputation of the same quantity from the "
-                    "raw input disagrees with your program. This normally means "
-                    "your occupancy expansion is wrong — re-read the problem "
-                    "statement's definition of a repeated use and any worked "
-                    "example it gives, re-derive the start of the k-th use, and "
-                    "assert your expansion reproduces that example before "
-                    "re-solving."
+                attempt_error_ratios.append((attempt, raw_error / raw_tolerance))
+                named = self_check.get("failed_criteria")
+                if isinstance(named, str):
+                    named = [named]
+                if isinstance(named, list):
+                    attempt_failed_criteria[attempt] = [
+                        str(item) for item in named if str(item).strip()
+                    ]
+                trend = _worsening_trend_note(
+                    attempt_error_ratios, attempt, attempt_failed_criteria
                 )
+                if trend:
+                    feedback.insert(0, trend)
+            # A bare numeric disagreement invites guesswork, so name the cause that
+            # fits THIS model. Telling a PDE solver to re-derive a combinatorial
+            # occupancy expansion sends it after a structure its problem does not
+            # have, and it can never converge from there.
+            if _independent_disagreement(report):
+                feedback.append(_disagreement_hint(model))
             state.fail(
                 "verify",
                 f"attempt {attempt} FAILED: {len(report.blocking_failures)} issue(s)",
@@ -898,186 +1230,215 @@ class CUMCMAutopilot:
             f"{len(evidence.list_claims())} claim(s)",
         )
 
-        # ── 12. Figures ───────────────────────────────────────
-        state.begin("figures", "rendering figures from verified results")
-        output_summaries = self._output_summaries(solve_dir, problem_context.required_outputs)
-        figure_builder = FigureBuilder(self._router)
-        specs = await figure_builder.propose(
-            statistics=statistics,
-            output_summaries=output_summaries,
-            subproblems=[s.model_dump(mode="json") for s in analysis.subproblems],
+        # ── 12-15. Publishing the verified solution ───────────
+        # Resuming must not re-draft a paper that is already written: the
+        # figure proposal and the section drafts are model calls, and
+        # regenerating them would replace a delivered paper with differently
+        # worded prose about the same numbers. The publication is reused only
+        # when the verified inputs behind it are unchanged.
+        output_summaries = self._output_summaries(
+            solve_dir, problem_context.required_outputs
         )
-        figures = figure_builder.render(
-            specs=specs,
-            statistics=statistics,
-            output_dir=solve_dir,
-            figures_dir=artifacts.figures,
-            execution_id=outcome.run_id,
-            source_data_ids=["EVD-EXECUTION"],
-        )
-        _write_json(
-            artifacts.figures / "figures.json",
-            [f.model_dump(mode="json") for f in figures.all()],
-        )
-        state.complete("figures", f"{len(figures.all())} figure(s) rendered")
-
-        # ── 13. Tables ────────────────────────────────────────
-        state.begin("tables", "building tables from verified results")
-        table_builder = TableBuilder()
-        tables = TableRegistry()
-        stats_table = table_builder.build_statistics_table(statistics, "EVD-EXECUTION")
-        if stats_table:
-            tables.register(stats_table)
-        for index, key in enumerate(_nested_stat_keys(statistics), start=2):
-            table = table_builder.build_nested_statistics_table(
+        publication_inputs = {
+            "outcome": outcome.run_id,
+            "model_version": model.version,
+            "statistics": statistics,
+            "subproblems": [s.model_dump(mode="json") for s in analysis.subproblems],
+            "output_summaries": output_summaries,
+        }
+        reusable = self._reusable_publication(artifacts, state, publication_inputs)
+        if reusable is not None:
+            figures, tables, paper = reusable
+            state.complete("figures", "reused from the previous run")
+            state.complete("tables", "reused from the previous run")
+            state.complete(
+                "paper",
+                f"{len(paper.sections)} section(s) reused from the previous run",
+                [str(artifacts.paper / "paper_ir.json")],
+            )
+        else:
+            # ── 12. Figures ───────────────────────────────────────
+            state.begin("figures", "rendering figures from verified results")
+            figure_builder = FigureBuilder(self._router)
+            specs = await figure_builder.propose(
                 statistics=statistics,
-                source_id="EVD-EXECUTION",
-                table_id=f"TAB-{index:03d}",
-                title=f"求解结果统计：{key}",
-                key=key,
+                output_summaries=output_summaries,
+                subproblems=[s.model_dump(mode="json") for s in analysis.subproblems],
             )
-            if table:
-                tables.register(table)
-        _write_json(
-            artifacts.tables / "tables.json",
-            [t.model_dump(mode="json") for t in tables.all()],
-        )
-        state.complete("tables", f"{len(tables.all())} table(s) built")
-
-        # ── 14. Paper context package ─────────────────────────
-        package = self._context_package(
-            context=problem_context,
-            analysis=analysis,
-            assumption_ledger=assumption_ledger,
-            ambiguity_register=ambiguity_register,
-            model=model,
-            outcome=outcome,
-            report=report,
-            statistics=statistics,
-            figures=figures,
-            tables=tables,
-            problem_context=problem_context,
-            output_files=problem_context.required_outputs,
-        )
-        _write_json(artifacts.paper / "context_package.json", package.model_dump(mode="json"))
-
-        # ── 15. Progressive paper writing ─────────────────────
-        state.begin("paper", "outline → section drafting → assembly")
-        writer = PaperWriter(self._router)
-        outline = await self._retry_call(
-            "paper-outline", lambda: writer.build_outline(package)
-        )
-        _write_json(artifacts.paper / "outline.json", outline.model_dump(mode="json"))
-
-        drafts = []
-        for index, section in enumerate(outline.sections, start=1):
-            draft = await self._retry_call(
-                f"paper-section:{section.title}",
-                lambda s=section, i=index: writer.write_section(s, package, i),
+            figures = figure_builder.render(
+                specs=specs,
+                statistics=statistics,
+                output_dir=solve_dir,
+                figures_dir=artifacts.figures,
+                execution_id=outcome.run_id,
+                source_data_ids=["EVD-EXECUTION"],
             )
-            drafts.append(draft)
             _write_json(
-                artifacts.paper / "sections" / f"{index:02d}_{section.title}.json",
-                draft.model_dump(mode="json"),
+                artifacts.figures / "figures.json",
+                [f.model_dump(mode="json") for f in figures.all()],
             )
-        blocked_sections = [d.title for d in drafts if d.blocked]
-        if blocked_sections:
-            state.notes.append(
-                "Sections reported as blocked by the writer: " + "、".join(blocked_sections)
-            )
+            state.complete("figures", f"{len(figures.all())} figure(s) rendered")
 
-        # A number in the prose that no verified source supports is a fabricated
-        # figure. Rewrite only the sections that contain one, so the rest of the
-        # paper is not disturbed.
-        allowed_numbers = _traceable_numbers(
-            statistics,
-            tables,
-            problem_context.problem_text,
-            extra=self._verifiable_extras(report, output_summaries),
-        )
-        for _ in range(2):
-            prose = " ".join(
-                paragraph for draft in drafts for paragraph in draft.paragraphs
-            )
-            unsupported = _untraceable_numbers(prose, allowed_numbers)
-            if not unsupported:
-                break
-            offenders = [
-                index for index, draft in enumerate(drafts)
-                if _untraceable_numbers(" ".join(draft.paragraphs), allowed_numbers)
-            ]
-            if not offenders:
-                break
-            logger.warning(
-                "Rewriting %d section(s) that state unsupported numbers: %s",
-                len(offenders), sorted(unsupported),
-            )
-            correction = (
-                "Your previous draft stated numbers that no verified source "
-                "supports: " + "、".join(sorted(unsupported)) + ". "
-                "Remove or correct them. Every number you state must appear "
-                "verbatim in `verified_statistics`, in the output file summaries, "
-                "or in the problem statement. If you do not have a verified value, "
-                "do not state one."
-            )
-            for index in offenders:
-                drafts[index] = await self._retry_call(
-                    f"paper-repair:{outline.sections[index].title}",
-                    lambda i=index: writer.write_section(
-                        outline.sections[i], package, i + 1, correction=correction
-                    ),
+            # ── 13. Tables ────────────────────────────────────────
+            state.begin("tables", "building tables from verified results")
+            table_builder = TableBuilder()
+            tables = TableRegistry()
+            stats_table = table_builder.build_statistics_table(statistics, "EVD-EXECUTION")
+            if stats_table:
+                tables.register(stats_table)
+            for index, key in enumerate(_nested_stat_keys(statistics), start=2):
+                table = table_builder.build_nested_statistics_table(
+                    statistics=statistics,
+                    source_id="EVD-EXECUTION",
+                    table_id=f"TAB-{index:03d}",
+                    title=f"求解结果统计：{key}",
+                    key=key,
                 )
+                if table:
+                    tables.register(table)
+            _write_json(
+                artifacts.tables / "tables.json",
+                [t.model_dump(mode="json") for t in tables.all()],
+            )
+            state.complete("tables", f"{len(tables.all())} table(s) built")
+
+            # ── 14. Paper context package ─────────────────────────
+            package = self._context_package(
+                context=problem_context,
+                analysis=analysis,
+                assumption_ledger=assumption_ledger,
+                ambiguity_register=ambiguity_register,
+                model=model,
+                outcome=outcome,
+                report=report,
+                statistics=statistics,
+                figures=figures,
+                tables=tables,
+                problem_context=problem_context,
+                output_files=problem_context.required_outputs,
+            )
+            _write_json(artifacts.paper / "context_package.json", package.model_dump(mode="json"))
+
+            # ── 15. Progressive paper writing ─────────────────────
+            state.begin("paper", "outline → section drafting → assembly")
+            writer = PaperWriter(self._router)
+            outline = await self._retry_call(
+                "paper-outline", lambda: writer.build_outline(package)
+            )
+            _write_json(artifacts.paper / "outline.json", outline.model_dump(mode="json"))
+
+            drafts = []
+            for index, section in enumerate(outline.sections, start=1):
+                draft = await self._retry_call(
+                    f"paper-section:{section.title}",
+                    lambda s=section, i=index: writer.write_section(s, package, i),
+                )
+                drafts.append(draft)
                 _write_json(
-                    artifacts.paper / "sections"
-                    / f"{index + 1:02d}_{outline.sections[index].title}.json",
-                    drafts[index].model_dump(mode="json"),
+                    artifacts.paper / "sections" / f"{index:02d}_{section.title}.json",
+                    draft.model_dump(mode="json"),
+                )
+            blocked_sections = [d.title for d in drafts if d.blocked]
+            if blocked_sections:
+                state.notes.append(
+                    "Sections reported as blocked by the writer: " + "、".join(blocked_sections)
                 )
 
-        abstract = await self._retry_call(
-            "paper-abstract", lambda: writer.write_abstract(outline, package, drafts)
-        )
-        # The abstract is prose too, and it is the part every judge reads first.
-        for _ in range(2):
-            unsupported = _untraceable_numbers(abstract, allowed_numbers)
-            if not unsupported:
-                break
-            logger.warning(
-                "Rewriting the abstract; it states unsupported numbers: %s",
-                sorted(unsupported),
+            # A number in the prose that no verified source supports is a fabricated
+            # figure. Rewrite only the sections that contain one, so the rest of the
+            # paper is not disturbed.
+            allowed_numbers = _traceable_numbers(
+                statistics,
+                tables,
+                problem_context.problem_text,
+                extra=self._verifiable_extras(report, output_summaries),
             )
-            abstract = await self._retry_call(
-                "paper-abstract-repair",
-                lambda: writer.write_abstract(
-                    outline, package, drafts,
-                    correction=(
-                        "Your previous abstract stated numbers that no verified source "
-                        "supports: " + "、".join(sorted(unsupported)) + ". "
-                        "Every number must appear verbatim in `verified_statistics` or in "
-                        "the problem statement. Remove the rest."
-                    ),
-                ),
-            )
-        remaining = _untraceable_numbers(abstract, allowed_numbers)
-        if remaining:
-            state.notes.append(
-                "abstract still states unsupported numbers after repair: "
-                + "、".join(sorted(remaining))
-            )
+            for _ in range(2):
+                prose = " ".join(
+                    paragraph for draft in drafts for paragraph in draft.paragraphs
+                )
+                unsupported = _untraceable_numbers(prose, allowed_numbers)
+                if not unsupported:
+                    break
+                offenders = [
+                    index for index, draft in enumerate(drafts)
+                    if _untraceable_numbers(" ".join(draft.paragraphs), allowed_numbers)
+                ]
+                if not offenders:
+                    break
+                logger.warning(
+                    "Rewriting %d section(s) that state unsupported numbers: %s",
+                    len(offenders), sorted(unsupported),
+                )
+                correction = (
+                    "Your previous draft stated numbers that no verified source "
+                    "supports: " + "、".join(sorted(unsupported)) + ". "
+                    "Remove or correct them. Every number you state must appear "
+                    "verbatim in `verified_statistics`, in the output file summaries, "
+                    "or in the problem statement. If you do not have a verified value, "
+                    "do not state one."
+                )
+                for index in offenders:
+                    drafts[index] = await self._retry_call(
+                        f"paper-repair:{outline.sections[index].title}",
+                        lambda i=index: writer.write_section(
+                            outline.sections[i], package, i + 1, correction=correction
+                        ),
+                    )
+                    _write_json(
+                        artifacts.paper / "sections"
+                        / f"{index + 1:02d}_{outline.sections[index].title}.json",
+                        drafts[index].model_dump(mode="json"),
+                    )
 
-        paper = drafts_to_paper_ir(
-            title=outline.title or "数学建模竞赛论文",
-            abstract=abstract,
-            keywords=outline.keywords or ["数学建模", "优化", "算法"],
-            drafts=drafts,
-        )
-        _ensure_results_visible(paper, figures, tables)
-        _attach_claims(paper, evidence, statistics)
-        _write_json(artifacts.paper / "paper_ir.json", paper.model_dump(mode="json"))
-        state.complete(
-            "paper",
-            f"{len(paper.sections)} section(s), abstract {len(abstract)} chars",
-            [str(artifacts.paper / "paper_ir.json")],
-        )
+            abstract = await self._retry_call(
+                "paper-abstract", lambda: writer.write_abstract(outline, package, drafts)
+            )
+            # The abstract is prose too, and it is the part every judge reads first.
+            for _ in range(2):
+                unsupported = _untraceable_numbers(abstract, allowed_numbers)
+                if not unsupported:
+                    break
+                logger.warning(
+                    "Rewriting the abstract; it states unsupported numbers: %s",
+                    sorted(unsupported),
+                )
+                abstract = await self._retry_call(
+                    "paper-abstract-repair",
+                    lambda: writer.write_abstract(
+                        outline, package, drafts,
+                        correction=(
+                            "Your previous abstract stated numbers that no verified source "
+                            "supports: " + "、".join(sorted(unsupported)) + ". "
+                            "Every number must appear verbatim in `verified_statistics` or in "
+                            "the problem statement. Remove the rest."
+                        ),
+                    ),
+                )
+            remaining = _untraceable_numbers(abstract, allowed_numbers)
+            if remaining:
+                state.notes.append(
+                    "abstract still states unsupported numbers after repair: "
+                    + "、".join(sorted(remaining))
+                )
+
+            paper = drafts_to_paper_ir(
+                title=outline.title or "数学建模竞赛论文",
+                abstract=abstract,
+                keywords=outline.keywords or ["数学建模", "优化", "算法"],
+                drafts=drafts,
+            )
+            _ensure_results_visible(paper, figures, tables)
+            _attach_claims(paper, evidence, statistics)
+            _write_json(artifacts.paper / "paper_ir.json", paper.model_dump(mode="json"))
+            state.complete(
+                "paper",
+                f"{len(paper.sections)} section(s), abstract {len(abstract)} chars",
+                [str(artifacts.paper / "paper_ir.json")],
+            )
+            _write_json(
+                artifacts.paper / "publication_inputs.json", publication_inputs
+            )
 
         # ── 16. Submission audit ──────────────────────────────
         state.begin("audit", "SubmissionCheck")
@@ -1236,6 +1597,10 @@ class CUMCMAutopilot:
         else:
             verification = ""
 
+        # Persist notes and status gathered after the last stage change (final
+        # warnings, ledger failures) and hand the finished run to the ledger.
+        state.save()
+
         return AutopilotResult(
             run_id=state.run_id,
             status=state.status.value,
@@ -1327,6 +1692,25 @@ class CUMCMAutopilot:
                 continue
             headers[info.original_name] = parsed_headers
         return headers
+
+    def _template_sheets(
+        self,
+        context: ProblemContext,
+    ) -> dict[str, list[str]]:
+        """Worksheet names each template file declares."""
+        from mathmodel.autopilot.verify import read_output_sheet_names
+
+        sheets: dict[str, list[str]] = {}
+        for info in context.attachments:
+            if info.role != "template":
+                continue
+            try:
+                sheets[info.original_name] = read_output_sheet_names(
+                    Path(info.storage_path)
+                )
+            except Exception:
+                continue
+        return sheets
 
     @staticmethod
     def _expected_row_counts(
@@ -1794,8 +2178,312 @@ def _write_json(path: Path, payload: Any) -> None:
     )
 
 
+def _json_key(payload: Any) -> str:
+    """A stable string for comparing two JSON payloads.
+
+    Values that do not survive a JSON round trip are compared as their
+    `str()` form on both sides, so a reloaded payload still compares equal to
+    the object it was written from.
+    """
+    return json.dumps(payload, sort_keys=True, default=str, ensure_ascii=False)
+
+
 def _nested_stat_keys(statistics: dict[str, Any]) -> list[str]:
     return [k for k, v in statistics.items() if isinstance(v, dict) and v]
+
+
+# Markers of one specific, repeated failure on this project: the number of grid
+# nodes and the length of a profile (or the number of output columns) disagreed.
+# Six consecutive repair attempts on the real A problem each surfaced a different
+# symptom of that single unresolved off-by-one -- `broadcast shapes (40,) (41,)`,
+# `22 columns passed, passed data had 21 columns`, `header/data mismatch: hdr=22
+# T=21 C=21`, `fp and xp are not of the same length`, `grid size 21 != profile
+# length 20` -- and every repair patched the call site the error happened to
+# surface at, so the error simply moved to the next one.
+_SHAPE_MISMATCH_MARKERS = (
+    "could not be broadcast together with shapes",
+    "are not of the same length",
+    "columns passed, passed data had",
+    "header/data mismatch",
+    "grid size",
+    "profile length",
+    # Measured on this project: a run failed four consecutive attempts with
+    # "IndexError: invalid index to scalar variable" twice, then "ValueError:
+    # could not broadcast input array from shape (2,) into shape (20,)", then
+    # "TypeError: 'float' object is not subscriptable". All three are ONE bug --
+    # a scalar where an array was expected -- but none of the markers above
+    # matched, so the classifier saw three unrelated classes and the escalation
+    # below never fired. The error moved; the bug did not.
+    "invalid index to scalar variable",
+    "object is not subscriptable",
+    "could not broadcast input array",
+    # Round 70 audit of 200 real solve outcomes: these are the SAME array/scalar
+    # convention bug, and each was being classified as its own bare signature, so
+    # the escalation never saw them repeat. Occurrence counts from that audit are
+    # in the comments.
+    "truth value of an array with more than one element is ambiguous",  # 6
+    "setting an array element with a sequence",  # 5
+    "only 0-dimensional arrays can be converted",  # 3
+    "must have same number of dimensions",  # 1
+    "too many indices for array",  # 1
+    "len() of unsized object",  # 1
+)
+
+# Round 93: a recurring failure that no class grouped, so the escalation never
+# fired. It is an output-bookkeeping error, not an array-shape error, so it gets
+# its own class rather than sharing the shape note -- that note tells the repair
+# the node count and the profile length disagree, which would misdirect it.
+_OUTPUT_BOOKKEEPING_MARKERS = (
+    "at least one sheet must be visible",  # 3
+    "no worksheet named",
+    "worksheet index",
+)
+
+_OUTPUT_BOOKKEEPING_NOTE = (
+    "STOP PATCHING THE CALL SITE. This is attempt {attempt} and the previous "
+    "{seen} attempt(s) failed while BUILDING THE OUTPUT WORKBOOK, not while "
+    "solving. The solver ran; the error came from the file-writing step. Do not "
+    "add another try/except around the write, and do not change the numerics. "
+    "Instead make the workbook construction unconditional: create or select the "
+    "target worksheet BEFORE writing any cell, never delete the last remaining "
+    "worksheet, and write a row only after its sheet exists. Keep the sheet "
+    "names the template requires -- renaming or removing a template sheet to "
+    "work around this is not a fix."
+)
+
+_SHAPE_MISMATCH_NOTE = (
+    "STOP PATCHING CALL SITES. This is attempt {attempt} and the previous {seen} "
+    "attempt(s) failed the same class of error: the number of grid nodes and the "
+    "length of a profile (or the number of output columns) disagree. Each earlier "
+    "repair fixed the line where the error surfaced, which is why the error moved "
+    "to a different line instead of going away. Do not add another assertion, "
+    "reshape, or interpolation call. Instead find the single place that defines "
+    "the node count and the single place that defines the output column count, "
+    "make them agree, and derive every other length in the program from one "
+    "constant. The template fixes the output columns; the internal node count is "
+    "your own choice and must not determine the output shape."
+)
+
+_REPEATED_FAILURE_NOTE = (
+    "STOP PATCHING CALL SITES. This is attempt {attempt} and the previous {seen} "
+    "attempt(s) failed the same way ({cls}). A repair that makes the error move "
+    "to a different line has not fixed anything: the fault is in a shared "
+    "definition, not at the site that reported it. Locate the one place that "
+    "defines the quantity both sides disagree about, change it there, and derive "
+    "the rest from that single definition."
+)
+
+# The solver's own guard that the problem's final target was met. Measured on
+# this project: attempts 2, 3, 4 and 6 all aborted on this assert at the
+# IDENTICAL value 2.5217 (the moisture never dried), each time with the message
+# reworded -- "final row", then "final written 60 s row", then "problem 3 final
+# written 60 s row". The rewording is the tell: the repair was editing the
+# guard's text instead of the physics, and a signature that strips only numbers
+# saw three different failures instead of one repeated one.
+_FINAL_TARGET_MARKERS = (
+    # "strictly below" subsumes both "not strictly below" and the solver's own
+    # wording "did not fall strictly below"; the narrower marker missed the
+    # latter. Measured in the round-70 audit of 200 real outcomes.
+    "strictly below",
+    "not < 0.15",
+    "is not below",
+    "not strictly less than",
+    "final row",
+    "final written",
+    # The solver's own guard is the most common phrasing in practice and was
+    # matching NONE of the markers above, so these target failures were being
+    # treated as unrelated one-off errors rather than one repeating class.
+    "target not satisfied",  # 2
+    "final max rounded",  # 3
+    "strict criterion failed",  # 2
+    "target not met",
+)
+
+
+def _repeated_final_target_note(attempt: int, seen: int) -> str:
+    """Tell the repair to fix the transport, not the wording of its own guard."""
+    return (
+        f"YOUR OWN GUARD KEEPS TRIPPING, and you keep rewording it. This is "
+        f"attempt {attempt} and the previous {seen} attempt(s) ended the same way: "
+        f"your assertion that the final moisture is strictly below the required "
+        f"threshold failed. Do NOT reword, relax or remove that assertion -- it is "
+        f"correctly reporting that your drying is far too weak, and silencing it "
+        f"would only hide the fault. The quantity it protects has not moved "
+        f"between attempts, so the repair has been aimed at the message rather "
+        f"than at the transport. Fix the mass transfer: check the surface "
+        f"conductance is measured on the surface area, that the diffusion law's "
+        f"exponent is the ratio the statement prints, and that the moisture "
+        f"boundary condition actually acts on the surface node."
+    )
+
+
+def _failure_signature(text: str) -> str:
+    """Collapse a failure message to a class key, ignoring the numbers in it."""
+    stripped = (text or "").strip()
+    if not stripped:
+        return "unknown"
+    line = stripped.splitlines()[-1]
+    return re.sub(r"\d+(?:\.\d+)?(?:e[-+]?\d+)?", "#", line)[:200].strip().lower()
+
+
+def _failure_class(text: str) -> str:
+    """Group a solver failure into a class the repair loop can notice repeating."""
+    lowered = (text or "").lower()
+    for marker in _OUTPUT_BOOKKEEPING_MARKERS:
+        if marker in lowered:
+            return "output-bookkeeping"
+    for marker in _SHAPE_MISMATCH_MARKERS:
+        if marker in lowered:
+            return "shape-mismatch"
+    # Checked before the numeric signature, so that a reworded but identical
+    # failure stays ONE class instead of looking like several.
+    for marker in _FINAL_TARGET_MARKERS:
+        if marker in lowered:
+            return "final-target-unmet"
+    return _failure_signature(text)
+
+
+def _worsening_trend_note(
+    history: list[tuple[int, float]],
+    attempt: int,
+    criteria: Optional[dict[int, list[str]]] = None,
+) -> Optional[str]:
+    """Tell the repair when its own attempts are getting WORSE, not better.
+
+    Per-attempt feedback describes the current failure. It cannot say that an
+    earlier attempt was closer, so a solver rewriting wholesale has no way to
+    notice it is drifting away from a discretisation that nearly worked.
+    Measured on this project: one attempt reached err=0.475 against its own
+    tolerance while a later one reached 57.319, on the same problem.
+
+    When the failed-criteria names are available they are included, because
+    "restore attempt 2" is only actionable if the solver can see WHICH criteria
+    attempt 2 had already satisfied.
+    """
+    scored = [(number, ratio) for number, ratio in history if ratio > 0.0]
+    if len(scored) < 2:
+        return None
+    best_attempt, best_ratio = min(scored, key=lambda item: item[1])
+    current = next((ratio for number, ratio in scored if number == attempt), None)
+    if current is None or current <= best_ratio:
+        return None
+    note = (
+        f"Your repairs are making the scheme WORSE, not better. Attempt "
+        f"{best_attempt} reached an error of {best_ratio:.4g} times its own "
+        f"tolerance, while attempt {attempt} reaches {current:.4g} times. Do not "
+        f"continue rewriting the scheme from the latest version: identify what "
+        f"attempt {best_attempt} did differently and restore that, then change "
+        f"only what the current issues require. A wholesale rewrite has already "
+        f"been shown to move away from the better discretisation."
+    )
+    if criteria:
+        better = criteria.get(best_attempt) or []
+        worse = criteria.get(attempt) or []
+        if better or worse:
+            note += (
+                f" Attempt {best_attempt} reported these criteria as failed: "
+                f"{', '.join(better) if better else '(none)'}; attempt {attempt} "
+                f"reports: {', '.join(worse) if worse else '(none)'}. Any "
+                f"criterion that the better attempt had satisfied is something "
+                f"your repair has broken."
+            )
+    return note
+
+
+def _repair_base_program(
+    history: list[tuple[int, float]],
+    programs: dict[int, str],
+    attempt: int,
+    fallback: Optional[str],
+) -> tuple[Optional[str], Optional[int]]:
+    """The program a repair should be based on, and the attempt it came from.
+
+    I43 tells the repair, in words, that it is drifting away from a better
+    attempt and should restore it. That is a request. This makes it structural:
+    when the current attempt is worse than the best one on record, the repair is
+    handed the BEST attempt's program as its starting point rather than the
+    worse program it has just written, so drifting away no longer depends on the
+    model choosing to obey.
+
+    Only used when at least two attempts carry a comparable error ratio and the
+    current one is strictly worse than the best; otherwise the ordinary
+    previous-attempt base is kept, since a monotone run has nothing to restore.
+    """
+    scored = [(number, ratio) for number, ratio in history if number in programs]
+    if len(scored) < 2:
+        return fallback, None
+    best_attempt, best_ratio = min(scored, key=lambda pair: pair[1])
+    current = dict(history).get(attempt)
+    if current is None or best_attempt == attempt or current <= best_ratio:
+        return fallback, None
+    return programs[best_attempt], best_attempt
+
+
+def _repeated_failure_note(failure_class: str, attempt: int, seen: int) -> str:
+    """Escalate when a repair loop is repeating itself instead of converging."""
+    if failure_class == "shape-mismatch":
+        return _SHAPE_MISMATCH_NOTE.format(attempt=attempt, seen=seen)
+    if failure_class == "output-bookkeeping":
+        return _OUTPUT_BOOKKEEPING_NOTE.format(attempt=attempt, seen=seen)
+    if failure_class == "final-target-unmet":
+        return _repeated_final_target_note(attempt, seen)
+    return _REPEATED_FAILURE_NOTE.format(
+        attempt=attempt, seen=seen, cls=failure_class
+    )
+
+
+def _independent_disagreement(report) -> bool:
+    """Whether an independent recomputation disagreed with the solver's numbers.
+
+    This decides which cause-level hint the repair loop adds. The hint has to fit
+    the model: a combinatorial explanation is useless, and actively misleading,
+    to a solver whose problem integrates a differential equation.
+    """
+    for check in list(getattr(report, "checks", []) or []):
+        if check.status != CheckStatus.FAIL or "independent" not in check.category:
+            continue
+        detail = check.detail or ""
+        if any(
+            word in detail
+            for word in ("recomputed", "claimed", "solver=", "independent=")
+        ):
+            return True
+    return False
+
+
+def _disagreement_hint(model) -> str:
+    """The cause-level hint to add when an independent recomputation disagrees.
+
+    The hint must fit the model. A combinatorial explanation is useless, and
+    actively misleading, to a solver whose problem integrates a differential
+    equation: it sends the solver after a structure its problem does not have,
+    and the repair loop cannot converge from there.
+    """
+    if model_integrates_differential_equations(model):
+        return (
+            "An independent recomputation of the same quantity from the raw input "
+            "disagrees with your program. For a model that integrates a differential "
+            "equation this normally means the NUMERICAL SCHEME is wrong, not that the "
+            "arithmetic is. Check in this order: (1) every term of the control-volume "
+            "balance must carry the same control-volume measure — an interior "
+            "diffusion coefficient that dropped the cell width, or a storage term "
+            "that mixes a per-node with a per-volume form, scales the entire scheme "
+            "and makes it heat or freeze incorrectly; (2) any Picard / fixed-point "
+            "loop must keep the PREVIOUS time level on the time-derivative right-hand "
+            "side, because rebuilding that right-hand side from the current iterate "
+            "converges to a different fixed point — raising the iteration count then "
+            "makes the answer worse, not better; (3) the boundary conditions and the "
+            "property closures must match the model's equations. Then validate the "
+            "corrected scheme against a case with a known exact answer and report the "
+            "measured deviation in `self_check` before re-solving."
+        )
+    return (
+        "An independent recomputation of the same quantity from the raw input "
+        "disagrees with your program. This normally means your occupancy expansion "
+        "is wrong — re-read the problem statement's definition of a repeated use and "
+        "any worked example it gives, re-derive the start of the k-th use, and assert "
+        "your expansion reproduces that example before re-solving."
+    )
 
 
 def _needs_model_repair(report) -> bool:

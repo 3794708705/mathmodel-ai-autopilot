@@ -6,6 +6,8 @@ LLM provides dimension scores; Python computes weighted totals.
 
 from __future__ import annotations
 
+import asyncio
+
 import logging
 from typing import Type
 
@@ -206,12 +208,40 @@ class ModelJury(BaseAgent):
         prompt = self._build_score_prompt(candidate)
         profile = TaskProfile.for_task_type(TaskType.MODEL_JURY)
 
-        llm_output = await self._router.route_structured_generate(
-            profile=profile,
-            prompt=prompt,
-            output_schema=JuryScoreOutput,
-            system_prompt=self._system_prompt(),
-        )
+        # A transient gateway failure on ONE candidate must not discard the whole
+        # run. Measured on this project: a single `httpx2.ReadError` surfaced as
+        # `openai.APIConnectionError` from this call, propagated out of `run`, and
+        # killed a run that had already completed intake, understanding, evidence
+        # extraction and candidate exploration -- the run ended `blocked` with
+        # "model selection failed" and every earlier stage's work was lost. The
+        # error is a transport blip, not a judgement about the candidate, so retry
+        # briefly before giving up.
+        llm_output = None
+        last_error: Exception | None = None
+        for attempt in range(3):
+            try:
+                llm_output = await self._router.route_structured_generate(
+                    profile=profile,
+                    prompt=prompt,
+                    output_schema=JuryScoreOutput,
+                    system_prompt=self._system_prompt(),
+                )
+                break
+            except Exception as exc:  # noqa: BLE001 - transport errors vary
+                last_error = exc
+                if attempt < 2:
+                    logger.warning(
+                        "ModelJury: scoring %s failed on attempt %d (%s); retrying",
+                        candidate.candidate_id,
+                        attempt + 1,
+                        exc,
+                    )
+                    await asyncio.sleep(2.0 * (attempt + 1))
+        if llm_output is None:
+            raise RuntimeError(
+                f"ModelJury could not score {candidate.candidate_id} after 3 "
+                f"attempts: {last_error}"
+            ) from last_error
 
         if not isinstance(llm_output, JuryScoreOutput):
             raise ValueError(
